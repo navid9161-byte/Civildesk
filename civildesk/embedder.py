@@ -85,7 +85,7 @@ def embed_passages(texts: list[str]) -> np.ndarray | None:
     if m is None or not texts:
         return None
     with _lock:
-        vecs = list(m.embed([f"passage: {t}" for t in texts], batch_size=32))
+        vecs = list(m.embed([f"passage: {t}" for t in texts], batch_size=8))  # دسته‌ی کوچک = حافظه‌ی کمتر
     return np.asarray(vecs, dtype=np.float32)
 
 

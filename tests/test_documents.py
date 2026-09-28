@@ -152,3 +152,23 @@ def test_openai_compatible_answer(monkeypatch):
     monkeypatch.setattr(llm.httpx, "post", broken_post)
     a = llm.answer("حداقل پوشش بتن تیر")
     assert a["mode"] == "extractive" and a["error"] and "۵۰" in a["answer"]
+
+
+def test_backfill_vectors_after_enabling_model(monkeypatch):
+    import numpy as np
+
+    from civildesk import db, embedder
+
+    _add(MABHAS, "mabhas9.txt")
+    documents.worker.run_pending()  # بدون مدل (CIVILDESK_NO_EMBEDDINGS)
+    with db.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM doc_chunks WHERE vec IS NULL").fetchone()[0] > 0
+
+    # فعال شدن مدل (مثلاً بعد از ارتقای پلن)
+    monkeypatch.setattr(embedder, "available", lambda: True)
+    monkeypatch.setattr(embedder, "embed_passages",
+                        lambda texts: np.ones((len(texts), embedder.DIM), dtype=np.float32))
+    assert documents.backfill_vectors() > 0
+    with db.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM doc_chunks WHERE vec IS NULL").fetchone()[0] == 0
+    assert documents.backfill_vectors() == 0

@@ -398,6 +398,38 @@ def process_document(doc_id: int) -> None:
     _vector_cache.invalidate()
 
 
+def backfill_vectors(batch: int = 64) -> int:
+    """ساخت بردار معنایی برای بندهایی که بدون آن نمایه شده‌اند.
+
+    مثلاً اگر برنامه مدتی با CIVILDESK_NO_EMBEDDINGS (پلن کم‌حافظه) اجرا شده و بعد مدل فعال شده باشد؛
+    دیگر لازم نیست اسناد دوباره پردازش شوند.
+    """
+    if not embedder.available():
+        return 0
+    done = 0
+    while not worker.stopping:
+        with db.connect() as conn:
+            rows = conn.execute(
+                "SELECT c.id, c.text, d.title FROM doc_chunks c JOIN documents d ON d.id = c.doc_id "
+                "WHERE c.vec IS NULL AND d.status = 'ready' LIMIT ?", (batch,),
+            ).fetchall()
+        if not rows:
+            break
+        vecs = embedder.embed_passages([f"{r['title']}: {r['text']}" for r in rows])
+        if vecs is None:
+            break
+        with db.connect() as conn:
+            conn.executemany(
+                "UPDATE doc_chunks SET vec = ? WHERE id = ?",
+                [(v.astype(np.float16).tobytes(), r["id"]) for v, r in zip(vecs, rows)],
+            )
+        done += len(rows)
+    if done:
+        log.info("بردار معنایی برای %d بند ساخته شد", done)
+        _vector_cache.invalidate()
+    return done
+
+
 class Worker:
     def __init__(self) -> None:
         self._event = threading.Event()
@@ -439,6 +471,10 @@ class Worker:
 
     def _run(self) -> None:
         embedder.get_model()  # بارگذاری مدل در پس‌زمینه
+        try:
+            backfill_vectors()
+        except Exception:
+            log.exception("ساخت بردارهای جامانده ناموفق بود")
         while not self.stopping:
             try:
                 self.run_pending()
