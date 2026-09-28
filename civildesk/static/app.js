@@ -54,6 +54,7 @@ const badge = (entity, field, value) =>
 // ───────────────────────── تب‌ها ─────────────────────────
 const TABS = [
   ["dashboard", "داشبورد"],
+  ["docs", "اسناد و پرسش 📚"],
   ["chat", "دستیار 🤖"],
   ["tasks", "وظایف"],
   ["projects", "پروژه‌ها"],
@@ -84,6 +85,7 @@ async function render() {
   try {
     if (state.tab === "dashboard") await renderDashboard(view);
     else if (state.tab === "chat") await renderChat(view);
+    else if (state.tab === "docs") await renderDocs(view);
     else await renderEntity(view, state.tab);
   } catch (e) {
     view.innerHTML = `<div class="card error">${esc(e.message)}</div>`;
@@ -440,6 +442,208 @@ async function renderChat(view) {
     msgs.scrollTop = msgs.scrollHeight;
   };
   ta.focus();
+}
+
+// ───────────────────────── اسناد و پرسش ─────────────────────────
+const docsState = { selected: new Set(), last: null, poll: null, asking: false, question: "" };
+const STATUS_FA = { queued: "در صف", processing: "در حال پردازش", ready: "آماده", error: "خطا" };
+
+// یکسان‌سازی ساده برای پررنگ کردن واژه‌ها (هم‌راستا با textnorm.normalize در سرور)
+function normFa(s) {
+  return String(s || "")
+    .replace(/[يى]/g, "ی").replace(/ك/g, "ک").replace(/[ۀة]/g, "ه").replace(/[أإآ]/g, "ا")
+    .replace(/[ً-ٰٟـ‌]/g, "")
+    .replace(/[۰-۹]/g, (d) => "۰۱۲۳۴۵۶۷۸۹".indexOf(d)).replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d))
+    .toLowerCase();
+}
+function markTerms(text, terms) {
+  if (!terms || !terms.length) return esc(text);
+  return String(text).split(/(\s+)/).map((w) => {
+    const n = normFa(w).replace(/[^\p{L}\p{N}]/gu, "");
+    return n && terms.some((t) => n.startsWith(t)) ? `<mark>${esc(w)}</mark>` : esc(w);
+  }).join("");
+}
+
+async function renderDocs(view) {
+  const data = await api("/api/documents");
+  const { documents: docs, stats } = data;
+  const pending = docs.some((d) => d.status === "queued" || d.status === "processing");
+  const semantic = { ready: "فعال", pending: "در حال آماده‌سازی", failed: "غیرفعال" }[stats.semantic];
+  const answerMode = META.llm_provider ? "پاسخ نوشته‌شده با هوش مصنوعی" : "نمایش بخش‌های مرتبط از متن اسناد";
+
+  const docItems = docs.map((d) => {
+    const prog = d.status === "processing" && d.pages ? Math.round((100 * d.pages_done) / d.pages) : null;
+    const badgeCls = { ready: "green", error: "red", processing: "amber", queued: "gray" }[d.status];
+    return `<div class="doc ${docsState.selected.has(d.id) ? "sel" : ""}">
+      <input type="checkbox" data-sel="${d.id}" ${docsState.selected.has(d.id) ? "checked" : ""} title="فقط در این سند بگرد" ${d.status !== "ready" ? "disabled" : ""}>
+      <div class="body">
+        <div class="title">${esc(d.title)}</div>
+        <div class="meta">
+          <span class="badge ${badgeCls}">${STATUS_FA[d.status] || d.status}${prog !== null ? ` ${num(prog)}٪` : ""}</span>
+          ${d.pages ? `<span>${num(d.pages)} صفحه</span>` : ""}
+          ${d.ocr_pages ? `<span title="صفحه‌های اسکن‌شده یا خراب که از روی تصویر خوانده شدند">🔍 ${num(d.ocr_pages)} صفحه OCR</span>` : ""}
+          ${d.fixed_pages ? `<span>↔️ ${num(d.fixed_pages)} صفحه اصلاح جهت</span>` : ""}
+          ${d.weak_pages ? `<span class="badge amber" title="متن این صفحه‌ها کیفیت پایینی دارد">${num(d.weak_pages)} صفحه کم‌کیفیت</span>` : ""}
+          <span>${num(Math.round(d.size / 1024))} KB</span>
+        </div>
+        ${prog !== null ? `<div class="progress"><span style="width:${prog}%"></span></div>` : ""}
+        ${d.error ? `<div class="error">${esc(d.error)}</div>` : ""}
+      </div>
+      <div class="doc-actions">
+        <a class="btn" href="/api/documents/${d.id}/file" target="_blank" title="باز کردن فایل">📄</a>
+        ${d.status === "error" || d.status === "ready" ? `<button class="btn" data-reprocess="${d.id}" title="پردازش دوباره">↻</button>` : ""}
+        <button class="btn danger" data-del="${d.id}" title="حذف">🗑</button>
+      </div>
+    </div>`;
+  }).join("");
+
+  view.innerHTML = `
+    <div class="card ask">
+      <form id="ask-form">
+        <textarea name="q" rows="2" placeholder="سؤالت را بنویس… مثلاً «حداقل پوشش بتن برای تیر در شرایط محیطی شدید چقدر است؟»">${esc(docsState.question)}</textarea>
+        <div class="ask-row">
+          <span class="muted">${docsState.selected.size ? `جستجو فقط در ${num(docsState.selected.size)} سند انتخاب‌شده · <a href="#" id="sel-clear">همه‌ی اسناد</a>` : `جستجو در همه‌ی اسناد (${num(docs.filter((d) => d.status === "ready").length)})`}</span>
+          <button class="btn primary" ${docsState.asking ? "disabled" : ""}>${docsState.asking ? "در حال جستجو…" : "بپرس"}</button>
+        </div>
+      </form>
+    </div>
+    <div id="answer">${docsState.last ? answerHTML(docsState.last) : ""}</div>
+    <div class="card">
+      <h3>📚 کتابخانه‌ی اسناد <span class="count">${num(stats.n)} سند · ${num(stats.pages)} صفحه</span></h3>
+      <label class="drop" id="drop">
+        <input type="file" id="files" multiple accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp,.docx,.txt,.md" hidden>
+        <b>فایل‌ها را اینجا رها کنید یا کلیک کنید</b>
+        <small>PDF (متنی یا اسکن‌شده)، عکس، Word و متن — می‌توانید چند فایل را با هم انتخاب کنید</small>
+        <div class="progress" id="up-prog" hidden><span style="width:0"></span></div>
+      </label>
+      <div class="muted small">OCR: ${stats.ocr ? "فعال" : "نصب نیست (فایل‌های اسکن‌شده خوانده نمی‌شوند)"} · جستجوی معنایی: ${semantic} · حالت پاسخ: ${answerMode}</div>
+      <div class="list docs">${docItems || `<div class="empty">هنوز سندی بارگذاری نشده.</div>`}</div>
+    </div>`;
+
+  // پرسش
+  const form = $("#ask-form");
+  form.q.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const q = form.q.value.trim();
+    if (!q || docsState.asking) return;
+    docsState.question = q;
+    docsState.asking = true;
+    renderDocs(view);
+    try {
+      docsState.last = await api("/api/ask", { method: "POST", body: { question: q, doc_ids: [...docsState.selected] } });
+    } catch (err) {
+      docsState.last = { error: err.message, results: [] };
+    }
+    docsState.asking = false;
+    if (state.tab === "docs") renderDocs(view);
+  };
+  const clr = $("#sel-clear");
+  if (clr) clr.onclick = (e) => { e.preventDefault(); docsState.selected.clear(); renderDocs(view); };
+
+  // بارگذاری
+  const input = $("#files");
+  const drop = $("#drop");
+  input.onchange = () => upload(input.files, view);
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); upload(e.dataTransfer.files, view); });
+
+  // عملیات روی اسناد
+  view.querySelectorAll("[data-sel]").forEach((cb) => cb.onchange = () => {
+    const id = Number(cb.dataset.sel);
+    cb.checked ? docsState.selected.add(id) : docsState.selected.delete(id);
+    renderDocs(view);
+  });
+  view.querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
+    if (!confirm("این سند و همه‌ی متن استخراج‌شده‌اش حذف شود؟")) return;
+    await api(`/api/documents/${b.dataset.del}`, { method: "DELETE" });
+    docsState.selected.delete(Number(b.dataset.del));
+    renderDocs(view);
+  });
+  view.querySelectorAll("[data-reprocess]").forEach((b) => b.onclick = async () => {
+    await api(`/api/documents/${b.dataset.reprocess}/reprocess`, { method: "POST" });
+    toast("دوباره در صف پردازش قرار گرفت");
+    renderDocs(view);
+  });
+  bindAnswer(view);
+
+  clearTimeout(docsState.poll);
+  if (pending) docsState.poll = setTimeout(() => { if (state.tab === "docs" && !docsState.asking) renderDocs(view); }, 3000);
+}
+
+function answerHTML(a) {
+  if (a.error && !a.results?.length) return `<div class="card error">${esc(a.error)}</div>`;
+  const modeLabel = { claude: "پاسخ هوش مصنوعی (Claude)", openai: "پاسخ هوش مصنوعی", extractive: "مرتبط‌ترین جمله‌ها از متن اسناد" }[a.mode] || "";
+  const ans = esc(a.answer || "").replace(/\[([0-9۰-۹]+)\]/g, (m, n) => `<a href="#src-${normFa(n)}" class="cite">[${n}]</a>`);
+  const sources = (a.results || []).map((r, i) => `
+    <div class="source" id="src-${i + 1}">
+      <div class="src-head">
+        <span class="num">${num(i + 1)}</span>
+        <b>${esc(r.title)}</b> <span class="badge">صفحه ${num(r.page)}</span>
+        ${r.method === "ocr" ? `<span class="badge amber" title="این صفحه از روی تصویر خوانده شده؛ اعداد را با صفحه‌ی اصلی مقایسه کنید">OCR</span>` : ""}
+        ${r.semantic && !r.keyword ? `<span class="badge gray" title="بر اساس معنا پیدا شد، نه واژه‌های یکسان">معنایی</span>` : ""}
+      </div>
+      <div class="src-text">${markTerms(r.text, a.terms)}</div>
+      <div class="src-actions">
+        ${r.kind === "pdf" || r.kind === "image" ? `<button class="btn" data-page="${r.doc_id}:${r.page}:${r.kind}">🖼 دیدن صفحه‌ی اصلی</button>` : ""}
+        <a class="btn" href="/api/documents/${r.doc_id}/file#page=${r.page}" target="_blank">📄 باز کردن فایل</a>
+      </div>
+    </div>`).join("");
+  return `<div class="card answer">
+      <h3>${modeLabel}</h3>
+      ${a.error ? `<p class="error">${esc(a.error)}</p>` : ""}
+      <div class="answer-text">${ans}</div>
+    </div>
+    ${sources ? `<h4 class="sources-title">منابع (${num(a.results.length)})</h4><div class="list">${sources}</div>` : ""}`;
+}
+
+function bindAnswer(view) {
+  view.querySelectorAll("[data-page]").forEach((b) => b.onclick = () => {
+    const [id, page, kind] = b.dataset.page.split(":");
+    showPage(Number(id), Number(page), kind);
+  });
+}
+
+function showPage(docId, page, kind) {
+  const dlg = $("#pageview");
+  const img = $("#pv-img");
+  const set = (p) => {
+    page = p;
+    $("#pv-title").textContent = `صفحه ${faDigits(p)}`;
+    img.src = `/api/documents/${docId}/page/${p}.png`;
+  };
+  $("#pv-prev").onclick = () => page > 1 && set(page - 1);
+  $("#pv-next").onclick = () => set(page + 1);
+  $("#pv-prev").hidden = $("#pv-next").hidden = kind !== "pdf";
+  $("#pv-close").onclick = () => dlg.close();
+  img.onerror = () => { if (page > 1) set(page - 1); };
+  set(page);
+  dlg.showModal();
+}
+
+function upload(fileList, view) {
+  const files = [...fileList];
+  if (!files.length) return;
+  const fd = new FormData();
+  files.forEach((f) => fd.append("files", f));
+  const prog = $("#up-prog");
+  prog.hidden = false;
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/documents");
+  xhr.upload.onprogress = (e) => { if (e.lengthComputable) prog.firstElementChild.style.width = `${(100 * e.loaded) / e.total}%`; };
+  xhr.onload = () => {
+    let data = {};
+    try { data = JSON.parse(xhr.responseText); } catch { /* ignore */ }
+    if (xhr.status >= 300) toast(data.detail || "بارگذاری ناموفق بود");
+    else {
+      const dup = (data.added || []).filter((d) => d.duplicate).length;
+      toast(`${num(data.added.length - dup)} فایل بارگذاری شد${dup ? ` (${num(dup)} فایل تکراری بود)` : ""}${data.errors?.length ? " — خطا: " + data.errors.join("، ") : ""}`);
+    }
+    renderDocs(view);
+  };
+  xhr.onerror = () => { toast("اتصال قطع شد"); renderDocs(view); };
+  xhr.send(fd);
 }
 
 // ───────────────────────── شروع ─────────────────────────

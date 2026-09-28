@@ -40,6 +40,8 @@ SYSTEM_PROMPT = """تو «سیویل‌دسک»، دستیار شخصی یک م�
 - قبل از هر حذف، از کاربر تأیید صریح بگیر. ویرایش‌ها را بدون پرسیدن انجام بده.
 - برای «امروز چه کار دارم؟» یا «وضعیت کلی» از ابزار dashboard استفاده کن؛ برای یک پروژه از project_overview.
 - اطلاعات را از خودت نساز؛ اگر داده‌ای ثبت نشده، بگو.
+- برای پرسش‌های مربوط به مقررات، آیین‌نامه، قرارداد یا هر سندی که کاربر بارگذاری کرده، اول با documents_search \
+بگرد و پاسخ را با ذکر نام سند و شماره‌ی صفحه بده.
 - در پاسخ‌های فنی (محاسبات، ضوابط مبحث‌های مقررات ملی ساختمان، نشریه‌ی ۵۵ و فهرست‌بها) دقیق باش و اگر \
 مطمئن نیستی بگو که باید با متن مرجع چک شود.
 """
@@ -177,6 +179,22 @@ EXTRA_TOOLS: list[dict[str, Any]] = [
 ]
 
 
+EXTRA_TOOLS.append({
+    "name": "documents_search",
+    "description": "جستجو در کتابخانه‌ی اسناد کاربر (PDFهای مقررات، نشریات، قراردادها و ...). "
+                   "مرتبط‌ترین بندها را با نام سند و شماره‌ی صفحه برمی‌گرداند.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "پرسش یا واژه‌های کلیدی"},
+            "limit": {"type": "integer", "description": "تعداد نتیجه (پیش‌فرض ۶)"},
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+})
+
+
 def build_tools() -> list[dict[str, Any]]:
     tools = [t for ent in db.ENTITIES.values() for t in _entity_tools(ent)] + EXTRA_TOOLS
     tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}  # کش تعریف ابزارها
@@ -207,6 +225,14 @@ def execute_tool(name: str, args: dict[str, Any]) -> Any:
             return services.project_overview(conn, args["project_id"])
         if name == "finance_summary":
             return services.finance_summary(conn, **args)
+        if name == "documents_search":
+            from . import documents
+
+            found = documents.search(args["query"], limit=args.get("limit") or 6)
+            return [
+                {"source": f"{r['title']} — صفحه {r['page']}", "text": r["text"], "ocr": r["method"] == "ocr"}
+                for r in found["results"]
+            ]
         if name == "date_calc":
             base = jalali.normalize(args["date"])
             g = jalali.parse(base)

@@ -297,6 +297,45 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(status, due_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_channel ON chat_messages(channel, id)")
+    # کتابخانه‌ی اسناد (PDF و ...) برای پرسش و پاسخ
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            path TEXT NOT NULL,
+            sha256 TEXT,
+            size INTEGER,
+            kind TEXT,
+            pages INTEGER DEFAULT 0,
+            pages_done INTEGER DEFAULT 0,
+            ocr_pages INTEGER DEFAULT 0,
+            fixed_pages INTEGER DEFAULT 0,
+            weak_pages INTEGER DEFAULT 0,
+            chunks INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'queued',
+            error TEXT,
+            project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+            created_at TEXT,
+            updated_at TEXT
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS doc_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+            page INTEGER,
+            seq INTEGER,
+            text TEXT NOT NULL,
+            method TEXT,
+            vec BLOB
+        )"""
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_doc ON doc_chunks(doc_id, page, seq)")
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5("
+        "norm, chunk_id UNINDEXED, doc_id UNINDEXED, tokenize='unicode61 remove_diacritics 0')"
+    )
 
 
 def now_str() -> str:

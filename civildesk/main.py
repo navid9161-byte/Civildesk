@@ -12,13 +12,13 @@ from pathlib import Path
 from typing import Any
 
 import anthropic
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent, db, services, telegram_bot
+from . import agent, db, documents, llm, services, telegram_bot
 from .config import settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -40,7 +40,10 @@ async def lifespan(_: FastAPI):
     with db.connect():
         pass  # ساخت جدول‌ها
     bot = None if os.getenv("CIVILDESK_NO_BOT") else telegram_bot.start_in_background()
+    if not os.getenv("CIVILDESK_NO_WORKER"):
+        documents.worker.start()
     yield
+    documents.worker.stop()
     if bot:
         bot.stop()
 
@@ -82,6 +85,7 @@ def meta():
         "schema": db.schema(),
         "ai_enabled": bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN")),
         "telegram_enabled": bool(settings.telegram_token),
+        "llm_provider": llm.provider(),
     }
 
 
@@ -154,6 +158,77 @@ def chat_clear():
     with db.connect() as conn:
         db.clear_chat(conn, "web")
     return {"ok": True}
+
+
+# ───────────────────────── کتابخانه‌ی اسناد و پرسش از آن‌ها ─────────────────────────
+
+
+@app.get("/api/documents")
+def documents_list():
+    return {"documents": documents.list_documents(), "stats": documents.stats()}
+
+
+@app.post("/api/documents", status_code=201)
+def documents_upload(files: list[UploadFile] = File(...), project_id: int | None = Form(None)):
+    added, errors = [], []
+    for f in files:
+        try:
+            added.append(documents.add_document(f.file, f.filename or "file", project_id=project_id))
+        except db.ValidationError as e:
+            errors.append(f"{f.filename}: {e}")
+        finally:
+            f.file.close()
+    if errors and not added:
+        raise HTTPException(400, " | ".join(errors))
+    return {"added": added, "errors": errors}
+
+
+@app.delete("/api/documents/{doc_id}")
+def documents_delete(doc_id: int):
+    documents.delete_document(doc_id)
+    return {"ok": True}
+
+
+@app.post("/api/documents/{doc_id}/reprocess")
+def documents_reprocess(doc_id: int):
+    documents.get_document(doc_id)
+    documents.reprocess(doc_id)
+    return {"ok": True}
+
+
+@app.patch("/api/documents/{doc_id}")
+def documents_rename(doc_id: int, data: dict[str, Any]):
+    title = str(data.get("title") or "").strip()
+    if not title:
+        raise HTTPException(400, "عنوان خالی است")
+    documents.get_document(doc_id)
+    with db.connect() as conn:
+        conn.execute("UPDATE documents SET title=? WHERE id=?", (title, doc_id))
+    return documents.get_document(doc_id)
+
+
+@app.get("/api/documents/{doc_id}/file")
+def documents_file(doc_id: int):
+    d = documents.get_document(doc_id)
+    return FileResponse(d["path"], filename=d["filename"], content_disposition_type="inline")
+
+
+@app.get("/api/documents/{doc_id}/page/{page}.png")
+def documents_page(doc_id: int, page: int):
+    return Response(documents.render_page_png(doc_id, page), media_type="image/png",
+                    headers={"Cache-Control": "private, max-age=86400"})
+
+
+class AskIn(BaseModel):
+    question: str
+    doc_ids: list[int] | None = None
+
+
+@app.post("/api/ask")
+def ask(body: AskIn):
+    if not body.question.strip():
+        raise HTTPException(400, "پرسش خالی است")
+    return llm.answer(body.question.strip(), doc_ids=body.doc_ids or None)
 
 
 # ───────────────────────── CRUD عمومی برای همه‌ی موجودیت‌ها ─────────────────────────

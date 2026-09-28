@@ -26,3 +26,22 @@ def test_api_crud_flow():
         assert c.delete(f"/api/tasks/{t['id']}").json() == {"ok": True}
         assert c.get(f"/api/tasks/{t['id']}").status_code == 404
         assert c.get("/api/nope").status_code == 404
+
+
+def test_documents_api():
+    from civildesk import documents
+
+    with TestClient(app) as c:
+        r = c.post("/api/documents", files=[("files", ("n.txt", "بتن باید هفت روز مرطوب بماند.".encode(), "text/plain"))])
+        assert r.status_code == 201
+        doc_id = r.json()["added"][0]["id"]
+        r = c.post("/api/documents", files=[("files", ("x.exe", b"MZ", "application/octet-stream"))])
+        assert r.status_code == 400
+        documents.worker.run_pending()
+        assert c.get("/api/documents").json()["documents"][0]["status"] == "ready"
+        a = c.post("/api/ask", json={"question": "بتن چند روز مرطوب بماند"}).json()
+        assert a["results"][0]["doc_id"] == doc_id and a["mode"] == "extractive"
+        assert c.get(f"/api/documents/{doc_id}/file").status_code == 200
+        assert c.patch(f"/api/documents/{doc_id}", json={"title": "یادداشت بتن"}).json()["title"] == "یادداشت بتن"
+        assert c.delete(f"/api/documents/{doc_id}").json() == {"ok": True}
+        assert c.get(f"/api/documents/{doc_id}/file").status_code == 404
