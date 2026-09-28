@@ -52,10 +52,30 @@ const badge = (entity, field, value) =>
   value ? `<span class="badge ${BADGE_COLORS[field]?.[value] ?? ""}">${esc(choiceLabel(entity, field, value))}</span>` : "";
 
 // ───────────────────────── تب‌ها ─────────────────────────
+const ICONS = {
+  dashboard: "M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z",
+  docs: "M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5zM4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5M8 7h8M8 11h6",
+  chat: "M12 8V4H8M4 8h16v12H4zM2 14h2M20 14h2M9 13v2M15 13v2",
+  tasks: "M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11",
+  projects: "M3 21h18M5 21V11l5-3v13M10 21V5l9 4v12M13 10h3M13 14h3M13 18h3",
+  daily_reports: "M9 3h6v3H9zM8 4.5H6a1 1 0 0 0-1 1V20a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V5.5a1 1 0 0 0-1-1h-2M9 11h6M9 15h4",
+  invoices: "M5 3v18l2-1.5L9 21l2-1.5L13 21l2-1.5L17 21l2-1.5V3l-2 1.5L15 3l-2 1.5L11 3 9 4.5 7 3zM9 9h6M9 13h6",
+  transactions: "M3 7h15a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3H3zM3 7l12-4v4M16 13.5h.01",
+  contacts: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8",
+  notes: "M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z",
+  alert: "M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z",
+  target: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 18a6 6 0 1 0 0-12 6 6 0 0 0 0 12zM12 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4z",
+  calendar: "M3 5h18v16H3zM3 10h18M8 3v4M16 3v4",
+  flag: "M4 22V4M4 4h13l-2 4 2 4H4",
+  more: "M5 12h.01M12 12h.01M19 12h.01",
+  plus: "M12 5v14M5 12h14",
+};
+const ico = (name, cls = "ico") => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS[name] || ""}"/></svg>`;
+
 const TABS = [
   ["dashboard", "داشبورد"],
-  ["docs", "اسناد و پرسش 📚"],
-  ["chat", "دستیار 🤖"],
+  ["docs", "اسناد و پرسش"],
+  ["chat", "دستیار هوشمند"],
   ["tasks", "وظایف"],
   ["projects", "پروژه‌ها"],
   ["daily_reports", "گزارش روزانه"],
@@ -64,19 +84,36 @@ const TABS = [
   ["contacts", "مخاطبین"],
   ["notes", "یادداشت‌ها"],
 ];
+const BOTTOM_TABS = ["dashboard", "tasks", "docs", "projects"];
+const tabLabel = (k) => (TABS.find(([key]) => key === k) || [k, k])[1];
 
 function renderTabs() {
-  $("#tabs").innerHTML = TABS.map(([k, l]) => `<button data-tab="${k}" class="${state.tab === k ? "active" : ""}">${l}</button>`).join("");
+  $("#tabs").innerHTML = TABS.map(([k, l]) =>
+    `<button data-tab="${k}" class="${state.tab === k ? "active" : ""}">${ico(k)}<span>${l}</span></button>`).join("");
+  $("#bottomnav").innerHTML = BOTTOM_TABS.map((k) =>
+    `<button data-tab="${k}" class="${state.tab === k ? "active" : ""}">${ico(k)}<span>${tabLabel(k)}</span></button>`).join("")
+    + `<button data-menu="1" class="${BOTTOM_TABS.includes(state.tab) ? "" : "active"}">${ico("more")}<span>بیشتر</span></button>`;
+  $("#page-title").textContent = tabLabel(state.tab);
+  document.title = `${tabLabel(state.tab)} · سیویل‌دسک`;
 }
-$("#tabs").addEventListener("click", (e) => {
-  const b = e.target.closest("button[data-tab]");
-  if (b) go(b.dataset.tab);
-});
+function toggleMenu(open) {
+  document.body.classList.toggle("menu-open", open);
+}
+for (const id of ["#tabs", "#bottomnav"]) {
+  $(id).addEventListener("click", (e) => {
+    if (e.target.closest("[data-menu]")) return toggleMenu(true);
+    const b = e.target.closest("button[data-tab]");
+    if (b) { toggleMenu(false); go(b.dataset.tab); }
+  });
+}
+$("#menu-btn").onclick = () => toggleMenu(!document.body.classList.contains("menu-open"));
+$("#scrim").onclick = () => toggleMenu(false);
 
 function go(tab) {
   state.tab = tab;
   localStorageSet("tab", tab);
   renderTabs();
+  window.scrollTo(0, 0);
   render();
 }
 
@@ -221,24 +258,41 @@ async function renderDashboard(view) {
         ${i.days_waiting !== null ? `<span class="${i.days_waiting > 30 ? "badge red" : ""}">${num(i.days_waiting)} روز از ارسال</span>` : ""}</div>
     </div></div>`).join("");
 
+  const h = new Date().getHours();
+  const greet = h < 5 ? "شب بخیر" : h < 12 ? "صبح بخیر" : h < 17 ? "روز بخیر" : "عصر بخیر";
+  const activeProjects = d.projects.filter((p) => p.status === "active").length;
   view.innerHTML = `
-    ${META.ai_enabled ? `<form class="quick" id="quick"><input name="q" placeholder="سریع بنویس… مثلاً «پنج‌شنبه ساعت ۹ جلسه با کارفرمای پروژه مهر، یادم بنداز»" autocomplete="off"><button class="btn primary">ثبت</button></form>` : ""}
+    <section class="hero">
+      <div class="hero-text">
+        <div class="hero-kicker">${esc(d.today_long)}</div>
+        <h2>${greet}، ${esc(META.owner)} 👷</h2>
+        <p>${d.overdue.length ? `${num(d.overdue.length)} کار عقب‌افتاده و ` : ""}${num(d.due_today.length)} کار برای امروز داری${activeProjects ? ` · ${num(activeProjects)} پروژه‌ی فعال` : ""}.</p>
+      </div>
+      <div class="hero-actions">
+        <button class="btn gold" data-new="tasks">${ico("plus")} وظیفه‌ی جدید</button>
+        <button class="btn ghost" data-new="daily_reports">${ico("daily_reports")} گزارش امروز</button>
+        <button class="btn ghost" data-go="docs">${ico("docs")} پرسش از اسناد</button>
+      </div>
+      ${META.ai_enabled ? `<form class="quick" id="quick"><input name="q" placeholder="سریع بنویس… مثلاً «پنج‌شنبه ساعت ۹ جلسه با کارفرمای پروژه مهر، یادم بنداز»" autocomplete="off"><button class="btn gold">ثبت</button></form>` : ""}
+    </section>
     <div class="stats">
-      <div class="stat ${d.overdue.length ? "bad" : ""}"><div class="v">${num(d.overdue.length)}</div><div class="l">کار عقب‌افتاده</div></div>
-      <div class="stat"><div class="v">${num(d.due_today.length)}</div><div class="l">کار امروز</div></div>
-      <div class="stat"><div class="v">${num(d.projects.filter((p) => p.status === "active").length)}</div><div class="l">پروژه‌ی فعال</div></div>
-      <div class="stat good"><div class="v">${num(d.month.income)}</div><div class="l">دریافتی این ماه (${META.currency})</div></div>
-      <div class="stat bad"><div class="v">${num(d.month.expense)}</div><div class="l">هزینه‌ی این ماه (${META.currency})</div></div>
+      <div class="stat ${d.overdue.length ? "bad" : ""}">${ico("alert")}<div><div class="v">${num(d.overdue.length)}</div><div class="l">کار عقب‌افتاده</div></div></div>
+      <div class="stat">${ico("target")}<div><div class="v">${num(d.due_today.length)}</div><div class="l">کار امروز</div></div></div>
+      <div class="stat">${ico("projects")}<div><div class="v">${num(activeProjects)}</div><div class="l">پروژه‌ی فعال</div></div></div>
+      <div class="stat good">${ico("transactions")}<div><div class="v">${num(d.month.income)}</div><div class="l">دریافتی این ماه (${META.currency})</div></div></div>
+      <div class="stat bad">${ico("invoices")}<div><div class="v">${num(d.month.expense)}</div><div class="l">هزینه‌ی این ماه (${META.currency})</div></div></div>
     </div>
     <div class="grid">
-      ${d.overdue.length ? `<div class="card"><h3>🔴 عقب‌افتاده <span class="count">${num(d.overdue.length)}</span></h3>${list(d.overdue, "")}</div>` : ""}
-      <div class="card"><h3>📌 امروز <span class="count">${num(d.due_today.length)}</span></h3>${list(d.due_today, "برای امروز کاری ثبت نشده.")}</div>
-      <div class="card"><h3>🗓 هفت روز آینده <span class="count">${num(d.upcoming.length)}</span></h3>${list(d.upcoming, "موردی نیست.")}</div>
-      ${d.important_undated.length ? `<div class="card"><h3>❗ مهم بدون مهلت</h3>${list(d.important_undated, "")}</div>` : ""}
-      <div class="card"><h3>🏗️ پروژه‌ها</h3>${projects ? `<div class="list mini">${projects}</div>` : `<div class="empty">هنوز پروژه‌ای ثبت نشده.</div>`}</div>
-      <div class="card"><h3>💰 صورت‌وضعیت‌های در انتظار پرداخت</h3>${invoices ? `<div class="list mini">${invoices}</div>` : `<div class="empty">موردی نیست.</div>`}</div>
+      ${d.overdue.length ? `<div class="card danger-edge"><h3>${ico("alert")} عقب‌افتاده <span class="count">${num(d.overdue.length)}</span></h3>${list(d.overdue, "")}</div>` : ""}
+      <div class="card"><h3>${ico("target")} امروز <span class="count">${num(d.due_today.length)}</span></h3>${list(d.due_today, "برای امروز کاری ثبت نشده.")}</div>
+      <div class="card"><h3>${ico("calendar")} هفت روز آینده <span class="count">${num(d.upcoming.length)}</span></h3>${list(d.upcoming, "موردی نیست.")}</div>
+      ${d.important_undated.length ? `<div class="card"><h3>${ico("flag")} مهم بدون مهلت</h3>${list(d.important_undated, "")}</div>` : ""}
+      <div class="card"><h3>${ico("projects")} پروژه‌ها</h3>${projects ? `<div class="list mini">${projects}</div>` : `<div class="empty">هنوز پروژه‌ای ثبت نشده.</div>`}</div>
+      <div class="card"><h3>${ico("invoices")} صورت‌وضعیت‌های در انتظار پرداخت</h3>${invoices ? `<div class="list mini">${invoices}</div>` : `<div class="empty">موردی نیست.</div>`}</div>
     </div>`;
 
+  view.querySelectorAll("[data-new]").forEach((b) => b.onclick = () => openForm(b.dataset.new, null));
+  view.querySelectorAll("[data-go]").forEach((b) => b.onclick = () => go(b.dataset.go));
   const quick = $("#quick");
   if (quick) {
     quick.addEventListener("submit", async (e) => {
@@ -509,7 +563,7 @@ async function renderDocs(view) {
     </div>
     <div id="answer">${docsState.last ? answerHTML(docsState.last) : ""}</div>
     <div class="card">
-      <h3>📚 کتابخانه‌ی اسناد <span class="count">${num(stats.n)} سند · ${num(stats.pages)} صفحه</span></h3>
+      <h3>${ico("docs")} کتابخانه‌ی اسناد <span class="count">${num(stats.n)} سند · ${num(stats.pages)} صفحه</span></h3>
       <label class="drop" id="drop">
         <input type="file" id="files" multiple accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp,.docx,.txt,.md" hidden>
         <b>فایل‌ها را اینجا رها کنید یا کلیک کنید</b>
@@ -674,6 +728,7 @@ async function upload(fileList, view) {
   }
   const d = new Intl.DateTimeFormat("fa-IR-u-ca-persian", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(new Date());
   $("#today").textContent = d;
+  $("#side-date").textContent = d;
   if (!TABS.some(([k]) => k === state.tab)) state.tab = "dashboard";
   renderTabs();
   render();
