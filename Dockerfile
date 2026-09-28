@@ -9,11 +9,13 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# مدل جستجوی معنایی هنگام ساخت دانلود می‌شود تا سرور به اینترنت خارجی نیاز نداشته باشد
+# مدل جستجوی معنایی هنگام ساخت دانلود می‌شود تا سرور به اینترنت خارجی نیاز نداشته باشد.
+# اگر دانلود ممکن نبود (مثلاً ساخت روی سرور ایران)، ساخت ادامه پیدا می‌کند و برنامه با جستجوی کلیدواژه‌ای کار می‌کند.
 ENV CIVILDESK_MODEL_DIR=/opt/models
 COPY civildesk/embedder.py /tmp/embedder.py
 RUN mkdir -p /tmp/dl/civildesk && touch /tmp/dl/civildesk/__init__.py \
- && cp /tmp/embedder.py /tmp/dl/civildesk/ && cd /tmp/dl && python -m civildesk.embedder \
+ && cp /tmp/embedder.py /tmp/dl/civildesk/ && cd /tmp/dl \
+ && (timeout 300 python -m civildesk.embedder || echo "WARNING: embedding model not downloaded; semantic search disabled") \
  && rm -rf /tmp/dl /tmp/embedder.py
 
 COPY civildesk ./civildesk
