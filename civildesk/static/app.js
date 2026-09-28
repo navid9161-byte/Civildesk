@@ -30,7 +30,7 @@ function toast(msg) {
   t.textContent = msg;
   t.hidden = false;
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => (t.hidden = true), 2600);
+  toast._t = setTimeout(() => (t.hidden = true), Math.max(2600, msg.length * 70));
 }
 
 const money = (v) => (v || v === 0 ? `${num(v)} ${META.currency}` : "");
@@ -622,28 +622,45 @@ function showPage(docId, page, kind) {
   dlg.showModal();
 }
 
-function upload(fileList, view) {
+// فایل‌ها یکی‌یکی فرستاده می‌شوند تا با قطع شدن اینترنت فقط همان فایل از دست برود
+function uploadOne(file, onProgress) {
+  return new Promise((resolve) => {
+    const fd = new FormData();
+    fd.append("files", file);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/documents");
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch { /* ignore */ }
+      if (xhr.status >= 300) resolve({ ok: false, error: data.detail || "بارگذاری ناموفق بود" });
+      else if (data.errors?.length) resolve({ ok: false, error: data.errors.join("، ") });
+      else resolve({ ok: true, duplicate: !!data.added?.[0]?.duplicate });
+    };
+    xhr.onerror = () => resolve({ ok: false, error: "اتصال قطع شد", network: true });
+    xhr.send(fd);
+  });
+}
+
+async function upload(fileList, view) {
   const files = [...fileList];
   if (!files.length) return;
-  const fd = new FormData();
-  files.forEach((f) => fd.append("files", f));
   const prog = $("#up-prog");
+  const label = $("#drop b");
   prog.hidden = false;
-  const xhr = new XMLHttpRequest();
-  xhr.open("POST", "/api/documents");
-  xhr.upload.onprogress = (e) => { if (e.lengthComputable) prog.firstElementChild.style.width = `${(100 * e.loaded) / e.total}%`; };
-  xhr.onload = () => {
-    let data = {};
-    try { data = JSON.parse(xhr.responseText); } catch { /* ignore */ }
-    if (xhr.status >= 300) toast(data.detail || "بارگذاری ناموفق بود");
-    else {
-      const dup = (data.added || []).filter((d) => d.duplicate).length;
-      toast(`${num(data.added.length - dup)} فایل بارگذاری شد${dup ? ` (${num(dup)} فایل تکراری بود)` : ""}${data.errors?.length ? " — خطا: " + data.errors.join("، ") : ""}`);
-    }
-    renderDocs(view);
-  };
-  xhr.onerror = () => { toast("اتصال قطع شد"); renderDocs(view); };
-  xhr.send(fd);
+  let ok = 0, dup = 0;
+  const failed = [];
+  for (let i = 0; i < files.length; i++) {
+    if (label) label.textContent = `در حال بارگذاری فایل ${num(i + 1)} از ${num(files.length)}: ${files[i].name}`;
+    const r = await uploadOne(files[i], (frac) => { prog.firstElementChild.style.width = `${(100 * (i + frac)) / files.length}%`; });
+    if (r.ok) { ok++; if (r.duplicate) dup++; }
+    else failed.push(`${files[i].name} (${r.error})`);
+  }
+  let msg = `${num(ok - dup)} فایل بارگذاری شد`;
+  if (dup) msg += ` · ${num(dup)} فایل تکراری بود`;
+  if (failed.length) msg += ` · ناموفق: ${failed.join("، ")} — فقط همین‌ها را دوباره بارگذاری کنید`;
+  toast(msg);
+  renderDocs(view);
 }
 
 // ───────────────────────── شروع ─────────────────────────
