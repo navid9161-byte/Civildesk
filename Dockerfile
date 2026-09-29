@@ -9,13 +9,17 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# مدل جستجوی معنایی هنگام ساخت دانلود می‌شود تا سرور به اینترنت خارجی نیاز نداشته باشد.
-# اگر دانلود ممکن نبود (مثلاً ساخت روی سرور ایران)، ساخت ادامه پیدا می‌کند و برنامه با جستجوی کلیدواژه‌ای کار می‌کند.
+# مدل جستجوی معنایی (حدود ۱۳۰ مگابایت) فقط وقتی دانلود می‌شود که WITH_SEMANTIC=1 باشد
+# (در liara.json → build.args). در حالت سبک لازم نیست و ساخت را کند می‌کند؛
+# محدودیت زمان ساخت لیارا در پلن پایه ۵ دقیقه است.
+ARG WITH_SEMANTIC=0
 ENV CIVILDESK_MODEL_DIR=/opt/models
 COPY civildesk/embedder.py /tmp/embedder.py
-RUN mkdir -p /tmp/dl/civildesk && touch /tmp/dl/civildesk/__init__.py \
- && cp /tmp/embedder.py /tmp/dl/civildesk/ && cd /tmp/dl \
- && (timeout 300 python -m civildesk.embedder || echo "WARNING: embedding model not downloaded; semantic search disabled") \
+RUN if [ "$WITH_SEMANTIC" = "1" ]; then \
+      mkdir -p /tmp/dl/civildesk && touch /tmp/dl/civildesk/__init__.py \
+      && cp /tmp/embedder.py /tmp/dl/civildesk/ && cd /tmp/dl \
+      && (timeout 150 python -m civildesk.embedder || echo "WARNING: embedding model not downloaded; semantic search disabled"); \
+    else echo "Semantic model skipped (WITH_SEMANTIC=0)"; fi \
  && rm -rf /tmp/dl /tmp/embedder.py
 
 COPY civildesk ./civildesk

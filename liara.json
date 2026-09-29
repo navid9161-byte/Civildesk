@@ -6,5 +6,10 @@
       "name": "data",
       "mountTo": "/data"
     }
-  ]
+  ],
+  "build": {
+    "args": [
+      "WITH_SEMANTIC=0"
+    ]
+  }
 }
