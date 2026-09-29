@@ -82,7 +82,7 @@ uvicorn civildesk.main:app --host 0.0.0.0 --port 8000
 ```bash
 docker build -t civildesk .
 docker run -d --name civildesk --restart unless-stopped \
-  --env-file .env -p 8000:8000 -v civildesk-data:/data civildesk
+  --env-file .env -p 8000:80 -v civildesk-data:/data civildesk
 ```
 
 برای HTTPS یک reverse proxy مثل Caddy یا Nginx جلوی آن بگذارید.
