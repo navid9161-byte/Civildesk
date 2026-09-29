@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#273A5A">
+  <title>سیویل‌دسک</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png">
+  <link rel="apple-touch-icon" href="/static/icon-180.png">
+  <link rel="preload" href="/static/fonts/Vazirmatn.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="logo-card"><img src="/static/logo.png" alt="Civil Desk" width="260" height="228"></div>
+      <nav class="nav" id="tabs"></nav>
+      <div class="side-foot">
+        <div class="side-date" id="side-date"></div>
+        <div class="side-ver">CivilDesk · دستیار شخصی مهندس</div>
+      </div>
+    </aside>
+    <div class="scrim" id="scrim"></div>
+
+    <div class="main">
+      <header class="topbar">
+        <button class="icon-btn menu-btn" id="menu-btn" aria-label="منو">
+          <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+        <img class="top-mark" src="/static/icon-180.png" alt="" width="34" height="34">
+        <div class="page-head">
+          <h1 id="page-title">داشبورد</h1>
+          <div class="today" id="today"></div>
+        </div>
+      </header>
+      <main id="view"></main>
+    </div>
+  </div>
+
+  <nav class="bottomnav" id="bottomnav"></nav>
+
+  <dialog id="modal">
+    <form method="dialog" id="modal-form">
+      <h3 id="modal-title"></h3>
+      <div id="modal-body" class="form-grid"></div>
+      <p class="error" id="modal-error"></p>
+      <div class="modal-actions">
+        <button type="submit" class="btn primary" value="save">ذخیره</button>
+        <button type="button" class="btn" id="modal-cancel">انصراف</button>
+        <button type="button" class="btn danger" id="modal-delete">حذف</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="pageview" class="pageview">
+    <div class="pv-bar">
+      <button class="btn" id="pv-prev">→ صفحه‌ی قبل</button>
+      <b id="pv-title"></b>
+      <button class="btn" id="pv-next">صفحه‌ی بعد ←</button>
+      <button class="btn" id="pv-close">✕</button>
+    </div>
+    <div class="pv-body"><img id="pv-img" alt="صفحه‌ی سند"></div>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

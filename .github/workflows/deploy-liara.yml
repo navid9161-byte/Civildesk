@@ -1,0 +1,48 @@
+# استقرار خودکار روی لیارا بعد از هر تغییر در کد.
+# پیش‌نیاز: دو Secret در تنظیمات مخزن گیت‌هاب
+#   LIARA_API_TOKEN  — کلید API از کنسول لیارا
+#   LIARA_APP_NAME   — نام برنامه‌ای که در لیارا ساخته‌اید
+name: Deploy to Liara
+
+on:
+  push:
+    branches: [main, claude/personal-ai-assistant-gdestk]
+  workflow_dispatch:
+
+concurrency:
+  group: liara-deploy
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Deploy
+        env:
+          LIARA_API_TOKEN: ${{ secrets.LIARA_API_TOKEN }}
+          LIARA_APP_NAME: ${{ secrets.LIARA_APP_NAME }}
+          LIARA_BUILD_LOCATION: ${{ vars.LIARA_BUILD_LOCATION }}
+        run: |
+          if [ -z "$LIARA_API_TOKEN" ] || [ -z "$LIARA_APP_NAME" ]; then
+            echo "::warning::LIARA_API_TOKEN / LIARA_APP_NAME secrets are not set yet; skipping deploy."
+            exit 0
+          fi
+          npm i -g @liara/cli@9
+          # محل ساخت: متغیر LIARA_BUILD_LOCATION (iran یا germany؛ آلمان فقط در پلن‌های بالاتر لیارا)
+          liara deploy --app="$LIARA_APP_NAME" --api-token="$LIARA_API_TOKEN" \
+            ${LIARA_BUILD_LOCATION:+--build-location=$LIARA_BUILD_LOCATION} --no-app-logs --message="${GITHUB_SHA::7}"

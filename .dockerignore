@@ -1,0 +1,14 @@
+# فایل‌هایی که برای اجرای برنامه لازم نیستند (ساخت سریع‌تر)
+.git
+.github
+.env
+data
+models
+tests
+__pycache__
+*.pyc
+.pytest_cache
+README.md
+run.bat
+run.sh
+requirements-dev.txt

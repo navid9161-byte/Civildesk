@@ -1,0 +1,15 @@
+{
+  "platform": "docker",
+  "port": 8000,
+  "disks": [
+    {
+      "name": "data",
+      "mountTo": "/data"
+    }
+  ],
+  "build": {
+    "args": [
+      "WITH_SEMANTIC=0"
+    ]
+  }
+}
