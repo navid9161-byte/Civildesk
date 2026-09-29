@@ -79,6 +79,9 @@ body {
   background-attachment: fixed;
   font-feature-settings: "ss01";
 }
+/* جلوگیری از جابه‌جایی افقی صفحه در موبایل (مثلاً به‌خاطر منوی کشویی بسته) */
+body { overflow-x: hidden; }
+img, svg, video { max-width: 100%; }
 button, input, select, textarea { font: inherit; color: inherit; }
 a { color: var(--primary); }
 .ico { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
@@ -360,11 +363,16 @@ mark { background: #fbe3a6; color: inherit; border-radius: 4px; padding: 0 2px; 
 /* ───────── موبایل و تبلت ───────── */
 @media (max-width: 960px) {
   .sidebar {
-    position: fixed; inset-block: 0; inset-inline-start: 0; height: 100%;
-    transform: translateX(100%); transition: transform .22s ease; box-shadow: none;
+    position: fixed; inset-block: 0; inset-inline-start: 0; height: 100%; max-width: 86vw; z-index: 50;
+    transform: translateX(100%); visibility: hidden; box-shadow: none;
+    transition: transform .22s ease, visibility 0s linear .22s;
   }
-  .menu-open .sidebar { transform: none; box-shadow: -20px 0 60px rgba(0, 0, 0, .25); }
-  .scrim { display: block; position: fixed; inset: 0; background: rgba(14, 22, 38, .45); z-index: 25; opacity: 0; pointer-events: none; transition: opacity .2s; }
+  .menu-open .sidebar {
+    transform: none; visibility: visible; box-shadow: -20px 0 60px rgba(0, 0, 0, .25);
+    transition: transform .22s ease, visibility 0s;
+  }
+  .menu-open { overflow: hidden; } /* وقتی منو باز است صفحه‌ی پشت اسکرول نشود */
+  .scrim { display: block; position: fixed; inset: 0; background: rgba(14, 22, 38, .45); z-index: 45; opacity: 0; pointer-events: none; transition: opacity .2s; }
   .menu-open .scrim { opacity: 1; pointer-events: auto; }
   .menu-btn { display: grid; }
   .top-mark { display: block; }
