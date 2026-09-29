@@ -74,9 +74,12 @@ def _asset_version() -> str:
     return h.hexdigest()[:10]
 
 
+ASSET_VERSION = _asset_version()
+# مسیر فایل‌های ظاهری با هر نسخه عوض می‌شود (مثلاً /assets/3fa2c1d0e9/style.css)؛
+# این‌طور هیچ کش میانی (مرورگر یا CDN) نمی‌تواند نسخه‌ی قدیمی را نشان دهد.
 _INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8").replace(
-    '.js"', f'.js?v={_asset_version()}"'
-).replace('.css"', f'.css?v={_asset_version()}"').replace('.png"', f'.png?v={_asset_version()}"')
+    '"/static/', f'"/assets/{ASSET_VERSION}/'
+)
 
 
 @app.get("/", include_in_schema=False)
@@ -86,6 +89,7 @@ def index():
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+app.mount(f"/assets/{ASSET_VERSION}", StaticFiles(directory=STATIC), name="assets")
 
 
 # ───────────────────────── API عمومی ─────────────────────────
