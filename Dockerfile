@@ -28,5 +28,6 @@ ENV CIVILDESK_DB=/data/civildesk.db \
     HF_HUB_OFFLINE=1 \
     PYTHONUNBUFFERED=1
 VOLUME /data
-EXPOSE 8000
-CMD ["uvicorn", "civildesk.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# پورت پیش‌فرض ۸۰ (همان پیش‌فرض لیارا)؛ با متغیر PORT قابل تغییر است
+EXPOSE 80
+CMD ["sh", "-c", "exec uvicorn civildesk.main:app --host 0.0.0.0 --port ${PORT:-80} --proxy-headers --forwarded-allow-ips='*'"]

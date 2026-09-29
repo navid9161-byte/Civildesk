@@ -1,6 +1,6 @@
 {
   "platform": "docker",
-  "port": 8000,
+  "port": 80,
   "disks": [
     {
       "name": "data",
