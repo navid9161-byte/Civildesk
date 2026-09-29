@@ -13,7 +13,7 @@ from typing import Any
 
 import anthropic
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -64,9 +64,25 @@ async def _not_found(_: Request, e: db.NotFound):
 # ───────────────────────── صفحات ─────────────────────────
 
 
+def _asset_version() -> str:
+    """نسخه‌ی فایل‌های ظاهری بر اساس محتوایشان؛ با هر تغییر، مرورگر نسخه‌ی تازه را می‌گیرد."""
+    import hashlib
+
+    h = hashlib.sha1()
+    for name in ("app.js", "style.css", "logo.png"):
+        h.update((STATIC / name).read_bytes())
+    return h.hexdigest()[:10]
+
+
+_INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8").replace(
+    '.js"', f'.js?v={_asset_version()}"'
+).replace('.css"', f'.css?v={_asset_version()}"').replace('.png"', f'.png?v={_asset_version()}"')
+
+
 @app.get("/", include_in_schema=False)
 def index():
-    return FileResponse(STATIC / "index.html")
+    # صفحه‌ی اصلی هرگز کش نشود تا به‌روزرسانی‌ها فوراً دیده شوند
+    return HTMLResponse(_INDEX_HTML, headers={"Cache-Control": "no-cache"})
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
