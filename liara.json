@@ -8,8 +8,8 @@
     }
   ],
   "build": {
-    "args": [
-      "WITH_SEMANTIC=0"
-    ]
+    "args": {
+      "WITH_SEMANTIC": "0"
+    }
   }
 }
