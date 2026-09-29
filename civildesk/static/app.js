@@ -87,8 +87,11 @@ const TABS = [
 const BOTTOM_TABS = ["dashboard", "tasks", "docs", "projects"];
 const tabLabel = (k) => (TABS.find(([key]) => key === k) || [k, k])[1];
 
+// تب «دستیار هوشمند» فقط وقتی مدل هوش مصنوعی تنظیم شده باشد نمایش داده می‌شود
+const visibleTabs = () => TABS.filter(([k]) => k !== "chat" || META?.ai_enabled);
+
 function renderTabs() {
-  $("#tabs").innerHTML = TABS.map(([k, l]) =>
+  $("#tabs").innerHTML = visibleTabs().map(([k, l]) =>
     `<button data-tab="${k}" class="${state.tab === k ? "active" : ""}">${ico(k)}<span>${l}</span></button>`).join("");
   $("#bottomnav").innerHTML = BOTTOM_TABS.map((k) =>
     `<button data-tab="${k}" class="${state.tab === k ? "active" : ""}">${ico(k)}<span>${tabLabel(k)}</span></button>`).join("")
@@ -729,7 +732,7 @@ async function upload(fileList, view) {
   const d = new Intl.DateTimeFormat("fa-IR-u-ca-persian", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(new Date());
   $("#today").textContent = d;
   $("#side-date").textContent = d;
-  if (!TABS.some(([k]) => k === state.tab)) state.tab = "dashboard";
+  if (!visibleTabs().some(([k]) => k === state.tab)) state.tab = "dashboard";
   renderTabs();
   render();
 })();
