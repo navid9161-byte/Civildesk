@@ -54,6 +54,7 @@ const badge = (entity, field, value) =>
 // ───────────────────────── تب‌ها ─────────────────────────
 const ICONS = {
   dashboard: "M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z",
+  archive: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 10h18M9 14h6",
   docs: "M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5zM4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5M8 7h8M8 11h6",
   chat: "M12 8V4H8M4 8h16v12H4zM2 14h2M20 14h2M9 13v2M15 13v2",
   tasks: "M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11",
@@ -74,6 +75,7 @@ const ico = (name, cls = "ico") => `<svg class="${cls}" viewBox="0 0 24 24" aria
 
 const TABS = [
   ["dashboard", "داشبورد"],
+  ["archive", "بایگانی پروژه‌ها"],
   ["docs", "اسناد و پرسش"],
   ["chat", "دستیار هوشمند"],
   ["tasks", "وظایف"],
@@ -84,7 +86,7 @@ const TABS = [
   ["contacts", "مخاطبین"],
   ["notes", "یادداشت‌ها"],
 ];
-const BOTTOM_TABS = ["dashboard", "tasks", "docs", "projects"];
+const BOTTOM_TABS = ["dashboard", "archive", "tasks", "docs"];
 const tabLabel = (k) => (TABS.find(([key]) => key === k) || [k, k])[1];
 
 // تب «دستیار هوشمند» فقط وقتی مدل هوش مصنوعی تنظیم شده باشد نمایش داده می‌شود
@@ -126,6 +128,7 @@ async function render() {
     if (state.tab === "dashboard") await renderDashboard(view);
     else if (state.tab === "chat") await renderChat(view);
     else if (state.tab === "docs") await renderDocs(view);
+    else if (state.tab === "archive") await renderArchive(view);
     else await renderEntity(view, state.tab);
   } catch (e) {
     view.innerHTML = `<div class="card error">${esc(e.message)}</div>`;
@@ -274,6 +277,7 @@ async function renderDashboard(view) {
       <div class="hero-actions">
         <button class="btn gold" data-new="tasks">${ico("plus")} وظیفه‌ی جدید</button>
         <button class="btn ghost" data-new="daily_reports">${ico("daily_reports")} گزارش امروز</button>
+        <button class="btn ghost" data-go="archive">${ico("archive")} بایگانی پروژه‌ها</button>
         <button class="btn ghost" data-go="docs">${ico("docs")} پرسش از اسناد</button>
       </div>
       ${META.ai_enabled ? `<form class="quick" id="quick"><input name="q" placeholder="سریع بنویس… مثلاً «پنج‌شنبه ساعت ۹ جلسه با کارفرمای پروژه مهر، یادم بنداز»" autocomplete="off"><button class="btn gold">ثبت</button></form>` : ""}
@@ -680,10 +684,11 @@ function showPage(docId, page, kind) {
 }
 
 // فایل‌ها یکی‌یکی فرستاده می‌شوند تا با قطع شدن اینترنت فقط همان فایل از دست برود
-function uploadOne(file, onProgress) {
+function uploadOne(file, onProgress, projectId) {
   return new Promise((resolve) => {
     const fd = new FormData();
     fd.append("files", file);
+    if (projectId) fd.append("project_id", projectId);
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/api/documents");
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
@@ -699,7 +704,7 @@ function uploadOne(file, onProgress) {
   });
 }
 
-async function upload(fileList, view) {
+async function upload(fileList, view, projectId = null, rerender = renderDocs) {
   const files = [...fileList];
   if (!files.length) return;
   const prog = $("#up-prog");
@@ -709,7 +714,7 @@ async function upload(fileList, view) {
   const failed = [];
   for (let i = 0; i < files.length; i++) {
     if (label) label.textContent = `در حال بارگذاری فایل ${num(i + 1)} از ${num(files.length)}: ${files[i].name}`;
-    const r = await uploadOne(files[i], (frac) => { prog.firstElementChild.style.width = `${(100 * (i + frac)) / files.length}%`; });
+    const r = await uploadOne(files[i], (frac) => { prog.firstElementChild.style.width = `${(100 * (i + frac)) / files.length}%`; }, projectId);
     if (r.ok) { ok++; if (r.duplicate) dup++; }
     else failed.push(`${files[i].name} (${r.error})`);
   }
@@ -717,7 +722,311 @@ async function upload(fileList, view) {
   if (dup) msg += ` · ${num(dup)} فایل تکراری بود`;
   if (failed.length) msg += ` · ناموفق: ${failed.join("، ")} — فقط همین‌ها را دوباره بارگذاری کنید`;
   toast(msg);
-  renderDocs(view);
+  rerender(view);
+}
+
+// ───────────────────────── بایگانی زنده‌ی پروژه‌ها ─────────────────────────
+const archiveState = {
+  pid: localStorageGet("archive_pid") === null ? null : Number(localStorageGet("archive_pid")),
+  cat: "", q: "", question: "", last: null, asking: false, poll: null, data: null,
+};
+const CAT_ICON = {
+  contract: "📜", amendment: "📎", letter: "✉️", minutes: "📝", order: "📣", invoice: "🧾",
+  guarantee: "🛡", financial: "💳", report: "📊", drawing: "📐", photo: "📷", other: "📁",
+};
+const catLabel = (c) => `${CAT_ICON[c] || "📁"} ${esc(archiveState.data?.categories?.[c] || c)}`;
+const srcLink = (x) =>
+  `<a href="#" class="src-link" data-src="${x.doc_id}:${x.page || 1}:${x.kind}" title="دیدن در سند">📄 ${esc(x.doc_title)}${x.page > 1 ? ` · ص ${num(x.page)}` : ""}</a>`;
+
+async function renderArchive(view) {
+  const ov = await api("/api/archive");
+  const projects = ov.projects;
+  if (!projects.length && !ov.unassigned) {
+    view.innerHTML = `<div class="card empty-state">
+      <h3>${ico("archive")} بایگانی پروژه‌ها</h3>
+      <p>برای هر پروژه یک بایگانی جدا ساخته می‌شود: قرارداد، نامه‌ها، صورتجلسه‌ها، صورت‌وضعیت‌ها و ضمانت‌نامه‌ها را
+      (PDF یا عکس) بارگذاری کنید؛ برنامه خودش دسته‌بندی می‌کند و خلاصه‌ی پروژه را به‌روز نگه می‌دارد.</p>
+      <button class="btn primary" id="arch-newp">+ اول یک پروژه بسازید</button>
+    </div>`;
+    $("#arch-newp").onclick = () => openForm("projects", null);
+    return;
+  }
+  const valid = (id) => (id === 0 ? ov.unassigned > 0 : projects.some((p) => p.id === id));
+  if (archiveState.pid === null || !valid(archiveState.pid)) archiveState.pid = projects[0]?.id ?? 0;
+  const pid = archiveState.pid;
+  const s = await api(`/api/archive/${pid}`);
+  archiveState.data = s;
+  const p = s.project;
+
+  const chips = projects.map((x) =>
+    `<button class="chip ${x.id === pid ? "active" : ""}" data-pid="${x.id}">${esc(x.name)} <span class="count">${num(x.docs)}</span></button>`).join("")
+    + (ov.unassigned ? `<button class="chip ${pid === 0 ? "active" : ""}" data-pid="0">بدون پروژه <span class="count">${num(ov.unassigned)}</span></button>` : "")
+    + `<button class="chip ghost no-print" id="arch-newp">+ پروژه‌ی جدید</button>`;
+
+  view.innerHTML = `
+    <div class="chips proj-chips">${chips}</div>
+    <div class="card arch-head">
+      <div>
+        <h2>${ico("archive")} ${p ? esc(p.name) : "اسناد بدون پروژه"}</h2>
+        <div class="muted small">${p ? [choiceLabel("projects", "status", p.status), p.location, p.employer && `کارفرما: ${p.employer}`].filter(Boolean).map(esc).join(" · ") : "این اسناد به هیچ پروژه‌ای وصل نشده‌اند؛ با دکمه‌ی ✏️ پروژه‌ی هرکدام را انتخاب کنید."}</div>
+        <div class="muted small">${num(s.documents.length)} سند${s.last_update ? ` · آخرین به‌روزرسانی خلاصه: ${faDigits(s.last_update)}` : ""}</div>
+      </div>
+      <div class="arch-actions no-print">
+        ${p ? `<button class="btn" id="arch-edit">✏️ مشخصات پروژه</button>` : ""}
+        <button class="btn" id="arch-print">🖨 چاپ خلاصه</button>
+      </div>
+    </div>
+    <label class="drop no-print" id="drop">
+      <input type="file" id="files" multiple accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp,.docx,.txt" hidden>
+      <b>${p ? `افزودن سند به بایگانی «${esc(p.name)}»` : "افزودن سند (پروژه از روی متن سند تشخیص داده می‌شود)"}</b>
+      <small>قرارداد، نامه، صورتجلسه، صورت‌وضعیت، ضمانت‌نامه، عکس… — PDF یا عکس، چند فایل با هم. دسته‌بندی و خلاصه خودکار است.</small>
+      <div class="progress" id="up-prog" hidden><span style="width:0"></span></div>
+    </label>
+    ${s.pending ? `<div class="card notice no-print">⏳ ${num(s.pending)} سند در حال خواندن و تحلیل است؛ خلاصه خودکار به‌روز می‌شود…</div>` : ""}
+    ${p ? summaryHTML(s) : ""}
+    <div class="card ask no-print">
+      <form id="arch-ask">
+        <textarea name="q" rows="2" placeholder="در اسناد این پروژه بگرد… مثلاً «مدت تمدید قرارداد» یا «نامه‌ی تأخیر سقف سوم»">${esc(archiveState.question)}</textarea>
+        <div class="ask-row">
+          <span class="muted">جستجو فقط در اسناد همین ${p ? "پروژه" : "بخش"}</span>
+          <button class="btn primary" ${archiveState.asking ? "disabled" : ""}>${archiveState.asking ? "در حال جستجو…" : "بگرد"}</button>
+        </div>
+      </form>
+    </div>
+    <div id="answer" class="no-print">${archiveState.last ? answerHTML(archiveState.last) : ""}</div>
+    <div class="card">
+      <h3>${ico("docs")} اسناد بایگانی <span class="count">${num(s.documents.length)}</span></h3>
+      <div class="toolbar no-print">
+        <input type="search" id="arch-q" placeholder="فیلتر بر اساس عنوان، شماره، موضوع…" value="${esc(archiveState.q)}">
+      </div>
+      <div class="chips no-print" id="arch-cats"></div>
+      <div class="list docs" id="arch-list"></div>
+    </div>`;
+
+  renderArchiveList();
+
+  view.querySelectorAll("[data-pid]").forEach((b) => b.onclick = () => {
+    archiveState.pid = Number(b.dataset.pid);
+    localStorageSet("archive_pid", archiveState.pid);
+    archiveState.cat = ""; archiveState.last = null; archiveState.question = "";
+    renderArchive(view);
+  });
+  $("#arch-newp").onclick = () => openForm("projects", null);
+  if (p) $("#arch-edit").onclick = () => openForm("projects", p);
+  $("#arch-print").onclick = () => window.print();
+
+  const input = $("#files");
+  const drop = $("#drop");
+  input.onchange = () => upload(input.files, view, pid || null, renderArchive);
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); upload(e.dataTransfer.files, view, pid || null, renderArchive); });
+
+  const sug = $("#arch-apply");
+  if (sug) sug.onclick = async () => {
+    const body = Object.fromEntries(s.suggestions.map((x) => [x.field, x.value]));
+    try {
+      await api(`/api/projects/${p.id}`, { method: "PATCH", body });
+      await loadProjects();
+      toast("مشخصات پروژه تکمیل شد ✔");
+      renderArchive(view);
+    } catch (err) { toast(err.message); }
+  };
+
+  const form = $("#arch-ask");
+  form.q.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const q = form.q.value.trim();
+    const ids = s.documents.filter((d) => d.status === "ready").map((d) => d.id);
+    if (!q || archiveState.asking) return;
+    if (!ids.length) return toast("هنوز سند آماده‌ای در این بایگانی نیست");
+    archiveState.question = q;
+    archiveState.asking = true;
+    renderArchive(view);
+    try {
+      archiveState.last = await api("/api/ask", { method: "POST", body: { question: q, doc_ids: ids } });
+    } catch (err) {
+      archiveState.last = { error: err.message, results: [] };
+    }
+    archiveState.asking = false;
+    if (state.tab === "archive") renderArchive(view);
+  };
+
+  const q = $("#arch-q");
+  q.oninput = () => { archiveState.q = q.value; renderArchiveList(); };
+  view.querySelectorAll("[data-cat]").forEach((b) => b.onclick = () => { archiveState.cat = b.dataset.cat; renderArchiveList(); });
+  bindAnswer(view);
+
+  clearTimeout(archiveState.poll);
+  if (s.pending) {
+    const again = () => {
+      if (state.tab !== "archive" || archiveState.pid !== pid) return;
+      const busy = archiveState.asking || document.querySelector("dialog[open]") || view.contains(document.activeElement) && document.activeElement.matches("input, textarea");
+      if (busy) archiveState.poll = setTimeout(again, 3000);
+      else renderArchive(view);
+    };
+    archiveState.poll = setTimeout(again, 3000);
+  }
+}
+
+function summaryHTML(s) {
+  const facts = s.facts.map((f) => `<div class="fact">
+      <dt>${esc(f.label)}</dt>
+      <dd>${f.money ? money(f.value) : esc(faDigits(f.value))}<div class="src">${srcLink(f)}</div></dd>
+    </div>`).join("");
+  const sugg = s.suggestions.length ? `<div class="suggest no-print">
+      <div>این اطلاعات از اسناد پیدا شد ولی در مشخصات پروژه خالی است:
+        <b>${s.suggestions.map((x) => `${esc(x.label)}: ${x.money ? money(x.value) : esc(faDigits(x.value))}`).join(" · ")}</b></div>
+      <button class="btn gold" id="arch-apply">ثبت در مشخصات پروژه</button>
+    </div>` : "";
+  const counts = Object.entries(s.counts).sort((a, b) => b[1] - a[1])
+    .map(([c, n]) => `<button class="chip" data-cat="${c}">${catLabel(c)} <span class="count">${num(n)}</span></button>`).join("");
+
+  const soon = (d) => d >= s.today && d <= addDaysStr(s.today, 7);
+  const rows = [];
+  if (s.deadlines.length) rows.push(`<h4>⏰ مهلت‌ها (از نامه‌ها و صورتجلسه‌ها)</h4>` + s.deadlines.map((x) => `<div class="row">
+      <span class="badge ${x.late ? "red" : soon(x.due) ? "amber" : ""}">${x.late ? "گذشته · " : ""}${faDigits(x.due)}</span>
+      <span class="grow">${esc(x.text)}</span>${srcLink(x)}</div>`).join(""));
+  if (s.guarantees.length) rows.push(`<h4>🛡 ضمانت‌نامه‌ها و بیمه‌ها</h4>` + s.guarantees.map((g) => `<div class="row">
+      ${g.valid_until ? `<span class="badge ${{ expired: "red", soon: "amber", ok: "green" }[g.state]}">${{ expired: "منقضی", soon: "نزدیک سررسید", ok: "معتبر" }[g.state]} تا ${faDigits(g.valid_until)}</span>` : `<span class="badge gray">سررسید نامشخص</span>`}
+      <span class="grow">${esc(g.subject)}${g.amount ? ` · ${money(g.amount)}` : ""}</span>${srcLink(g)}</div>`).join(""));
+  if (s.amendments.length) rows.push(`<h4>📎 الحاقیه‌ها و تمدیدها</h4>` + s.amendments.map((a) => `<div class="row">
+      <span class="badge gray">${faDigits(a.date)}</span>
+      <span class="grow">${esc(a.subject || "")}${a.amount ? ` · ${money(a.amount)}` : ""}${a.duration ? ` · ${esc(faDigits(a.duration))}` : ""}</span>${srcLink(a)}</div>`).join(""));
+  if (s.last_invoice) {
+    const x = s.last_invoice;
+    rows.push(`<h4>🧾 آخرین صورت‌وضعیت (از ${num(s.invoices)})</h4><div class="row">
+      <span class="badge gray">${faDigits(x.date)}</span>
+      <span class="grow">${x.no ? `شماره ${num(x.no)}` : ""}${x.amount ? ` · ${money(x.amount)}` : ""}</span>${srcLink(x)}</div>`);
+  }
+  for (const m of s.minutes.slice(0, 1)) {
+    rows.push(`<h4>📝 مصوبات آخرین صورتجلسه (${faDigits(m.date)})</h4><ol class="items">${m.items.map((i) => `<li>${esc(i)}</li>`).join("")}</ol><div class="row">${srcLink(m)}</div>`);
+  }
+  const timeline = s.timeline.length ? `<h4>🗂 آخرین اسناد</h4>` + s.timeline.slice(0, 8).map((t) => `<div class="row">
+      <span class="badge gray">${faDigits(t.date)}</span>
+      <span class="grow"><b>${catLabel(t.category)}</b> ${esc(t.subject || t.title)}${t.doc_no ? ` <span class="muted">(${esc(faDigits(t.doc_no))})</span>` : ""}</span>
+      <a href="#" class="src-link" data-src="${t.id}:1:">باز کردن</a></div>`).join("") : "";
+
+  return `<div class="card summary">
+    <h3>${ico("target")} خلاصه‌ی پروژه <span class="count">خودکار از روی اسناد</span></h3>
+    ${facts ? `<dl class="facts">${facts}</dl>` : `<p class="muted">برای خلاصه‌ی کامل (طرفین، مبلغ، مدت، تاریخ‌ها) قرارداد پروژه را بارگذاری کنید.</p>`}
+    ${sugg}
+    ${counts ? `<div class="chips">${counts}</div>` : ""}
+    ${rows.join("")}
+    ${timeline}
+    <p class="muted small">⚠️ این اطلاعات خودکار از متن اسناد خوانده شده؛ به‌خصوص در اسناد اسکن‌شده، اعداد را با سند اصلی چک کنید.</p>
+  </div>`;
+}
+
+function addDaysStr(jdate, n) {
+  // مقایسه‌ی تقریبی برای «نزدیک»: فقط روز ماه را جلو می‌برد (کافی برای رنگ برچسب)
+  const [y, m, d] = jdate.split("/").map(Number);
+  const nd = d + n, lim = m <= 6 ? 31 : 30;
+  if (nd <= lim) return `${y}/${String(m).padStart(2, "0")}/${String(nd).padStart(2, "0")}`;
+  const nm = m === 12 ? 1 : m + 1, ny = m === 12 ? y + 1 : y;
+  return `${ny}/${String(nm).padStart(2, "0")}/${String(nd - lim).padStart(2, "0")}`;
+}
+
+function renderArchiveList() {
+  const s = archiveState.data;
+  if (!s) return;
+  const present = [...new Set(s.documents.map((d) => d.category || (d.status === "ready" ? "other" : "")).filter(Boolean))];
+  $("#arch-cats").innerHTML = present.length > 1
+    ? `<button class="chip ${archiveState.cat ? "" : "active"}" data-cat="">همه</button>`
+      + present.map((c) => `<button class="chip ${archiveState.cat === c ? "active" : ""}" data-cat="${c}">${catLabel(c)}</button>`).join("")
+    : "";
+  const nq = normFa(archiveState.q.trim());
+  const docs = s.documents.filter((d) =>
+    (!archiveState.cat || (d.category || "other") === archiveState.cat)
+    && (!nq || normFa([d.title, d.subject, d.doc_no, d.info?.gist?.value, d.info?.to?.value].join(" ")).includes(nq)));
+  $("#arch-list").innerHTML = docs.map((d) => {
+    const prog = d.status === "processing" && d.pages ? Math.round((100 * d.pages_done) / d.pages) : null;
+    const viewable = d.kind === "pdf" || d.kind === "image";
+    const gist = d.info?.gist?.value;
+    return `<div class="doc arch-doc">
+      <div class="body">
+        <div class="title">${d.category ? `<span class="badge cat">${catLabel(d.category)}</span> ` : ""}${esc(d.subject || d.title)}</div>
+        <div class="meta">
+          ${d.status !== "ready" ? `<span class="badge ${d.status === "error" ? "red" : "amber"}">${STATUS_FA[d.status] || d.status}${prog !== null ? ` ${num(prog)}٪` : ""}</span>` : ""}
+          <span>📅 ${faDigits(d.date)}${d.doc_date ? "" : " (بارگذاری)"}</span>
+          ${d.doc_no ? `<span>شماره ${esc(faDigits(d.doc_no))}</span>` : ""}
+          ${d.info?.to ? `<span>به: ${esc(d.info.to.value.slice(0, 50))}</span>` : ""}
+          ${d.info?.amount ? `<span>💰 ${money(d.info.amount.value)}</span>` : ""}
+          ${d.pages > 1 ? `<span>${num(d.pages)} صفحه</span>` : ""}
+          ${d.ocr_pages ? `<span title="از روی تصویر خوانده شده">🔍 OCR</span>` : ""}
+          ${d.project_auto ? `<span class="badge gray" title="پروژه از روی متن سند تشخیص داده شد">🔗 وصل خودکار</span>` : ""}
+          ${d.subject ? `<span class="muted">${esc(d.title)}</span>` : ""}
+        </div>
+        ${gist ? `<div class="snippet">${esc(gist)}</div>` : ""}
+        ${prog !== null ? `<div class="progress"><span style="width:${prog}%"></span></div>` : ""}
+        ${d.error ? `<div class="error">${esc(d.error)}</div>` : ""}
+      </div>
+      <div class="doc-actions">
+        ${viewable ? `<button class="btn" data-src="${d.id}:1:${d.kind}" title="دیدن سند">👁</button>` : ""}
+        <a class="btn" href="/api/documents/${d.id}/file" target="_blank" title="باز کردن فایل اصلی">📄</a>
+        <button class="btn" data-edit="${d.id}" title="ویرایش دسته، تاریخ، پروژه…">✏️</button>
+        <button class="btn danger" data-adel="${d.id}" title="حذف">🗑</button>
+      </div>
+    </div>`;
+  }).join("") || `<div class="empty">${s.documents.length ? "سندی با این فیلتر پیدا نشد." : "هنوز سندی در این بایگانی نیست؛ از کادر بالا فایل اضافه کنید."}</div>`;
+
+  const list = $("#arch-list");
+  $("#arch-cats").querySelectorAll("[data-cat]").forEach((b) => b.onclick = () => { archiveState.cat = b.dataset.cat; renderArchiveList(); });
+  list.querySelectorAll("[data-edit]").forEach((b) => b.onclick = () => editDocMeta(s.documents.find((d) => d.id === Number(b.dataset.edit))));
+  list.querySelectorAll("[data-adel]").forEach((b) => b.onclick = async () => {
+    if (!confirm("این سند از بایگانی و کتابخانه حذف شود؟")) return;
+    await api(`/api/documents/${b.dataset.adel}`, { method: "DELETE" });
+    toast("حذف شد");
+    renderArchive($("#view"));
+  });
+}
+
+// پیوند به منبع: صفحه‌ی PDF/عکس در نمایشگر، بقیه در زبانه‌ی جدید
+document.addEventListener("click", (e) => {
+  const a = e.target.closest("[data-src]");
+  if (!a) return;
+  e.preventDefault();
+  const [id, page, kindHint] = a.dataset.src.split(":");
+  const kind = kindHint || archiveState.data?.documents.find((d) => d.id === Number(id))?.kind;
+  if (kind === "pdf" || kind === "image") showPage(Number(id), Number(page) || 1, kind);
+  else window.open(`/api/documents/${id}/file`, "_blank");
+});
+
+function editDocMeta(d) {
+  const modal = $("#modal");
+  const cats = archiveState.data.categories;
+  $("#modal-title").textContent = "ویرایش اطلاعات سند";
+  $("#modal-error").textContent = "";
+  $("#modal-body").innerHTML = `
+    <label class="wide">عنوان<input name="title" value="${esc(d.title)}"></label>
+    <label>دسته<select name="category">${Object.entries(cats).map(([k, l]) => `<option value="${k}" ${d.category === k ? "selected" : ""}>${CAT_ICON[k]} ${esc(l)}</option>`).join("")}</select></label>
+    <label>پروژه<select name="project_id"><option value="">— بدون پروژه —</option>${PROJECTS.map((p) => `<option value="${p.id}" ${p.id === d.project_id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></label>
+    <label>تاریخ سند<input name="doc_date" value="${esc(d.doc_date || "")}" placeholder="1403/05/12" inputmode="numeric"></label>
+    <label>شماره<input name="doc_no" value="${esc(d.doc_no || "")}"></label>
+    <label class="wide">موضوع<input name="subject" value="${esc(d.subject || "")}"></label>
+    <small class="wide muted">اصلاح شما ثابت می‌ماند و در پردازش دوباره عوض نمی‌شود.</small>`;
+  $("#modal-delete").hidden = true;
+  $("#modal-cancel").onclick = () => modal.close();
+  $("#modal-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const el = $("#modal-form").elements;
+    const body = {};
+    for (const k of ["title", "category", "doc_date", "doc_no", "subject"]) {
+      const v = el[k].value.trim();
+      const old = d[k] ?? "";
+      if (v !== String(old)) body[k] = v || null;
+    }
+    const pid = el.project_id.value ? Number(el.project_id.value) : null;
+    if (pid !== (d.project_id ?? null)) body.project_id = pid;
+    try {
+      if (Object.keys(body).length) await api(`/api/documents/${d.id}`, { method: "PATCH", body });
+      modal.close();
+      toast("ذخیره شد ✔");
+      renderArchive($("#view"));
+    } catch (err) { $("#modal-error").textContent = err.message; }
+  };
+  modal.showModal();
 }
 
 // ───────────────────────── شروع ─────────────────────────

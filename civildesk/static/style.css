@@ -360,6 +360,55 @@ mark { background: #fbe3a6; color: inherit; border-radius: 4px; padding: 0 2px; 
 .pv-body { overflow: auto; max-height: calc(94vh - 62px); background: #fff; }
 .pv-body img { display: block; width: 100%; height: auto; }
 
+/* ───────── بایگانی پروژه‌ها ───────── */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.proj-chips { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; margin-top: 0; scrollbar-width: thin; }
+.chip {
+  flex: none; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--card);
+  color: var(--text); border-radius: 999px; padding: 6px 12px; font: inherit; font-size: 13.5px; cursor: pointer; white-space: nowrap;
+}
+.chip:hover { border-color: var(--gold); }
+.chip.active { background: var(--navy); border-color: var(--navy); color: #fff; }
+.chip.active .count { background: var(--gold); color: var(--navy-900); }
+.chip.ghost { border-style: dashed; color: var(--muted); }
+.chip .count { background: var(--primary-soft); color: var(--primary); border-radius: 999px; padding: 0 7px; font-size: 12px; font-weight: 700; }
+.arch-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; border-top: 3px solid var(--gold); }
+.arch-head h2 { margin: 0 0 4px; font-size: 20px; display: flex; align-items: center; gap: 8px; }
+.arch-head h2 .ico { width: 24px; height: 24px; color: var(--gold-600); }
+.arch-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.notice { background: var(--warn-soft); border-color: color-mix(in srgb, var(--gold) 50%, var(--line)); }
+.facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; margin: 0 0 12px; }
+.fact { background: var(--card-2); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; min-width: 0; }
+.fact dt { font-size: 12.5px; color: var(--muted); margin-bottom: 2px; }
+.fact dd { margin: 0; font-weight: 700; overflow-wrap: anywhere; }
+.fact .src { font-weight: 400; font-size: 12px; margin-top: 4px; }
+.src-link { color: var(--muted); text-decoration: none; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; display: inline-block; vertical-align: bottom; }
+.src-link:hover { color: var(--gold-600); text-decoration: underline; }
+.suggest { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; background: var(--gold-soft); border-radius: 12px; padding: 10px 12px; margin-bottom: 12px; font-size: 14px; }
+@media (prefers-color-scheme: dark) { .suggest { background: var(--warn-soft); } }
+.summary h4 { margin: 16px 0 6px; font-size: 14.5px; }
+.summary .row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.summary .row .grow { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+.summary .row .src-link { max-width: 220px; }
+.items { margin: 4px 0; padding-inline-start: 22px; line-height: 1.9; font-size: 14px; }
+.arch-doc .snippet { font-size: 13px; color: var(--muted); margin-top: 4px; line-height: 1.8; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.badge.cat { background: var(--primary-soft); color: var(--primary); }
+.empty-state p { line-height: 2; color: var(--muted); }
+@media (max-width: 640px) {
+  .arch-doc { flex-wrap: wrap; }
+  .arch-doc .doc-actions { width: 100%; justify-content: flex-end; }
+  .facts { grid-template-columns: 1fr 1fr; }
+  .summary .row .src-link { max-width: 100%; }
+}
+
+/* ───────── چاپ خلاصه‌ی پروژه ───────── */
+@media print {
+  .sidebar, .topbar, .bottomnav, .scrim, .toast, .no-print, .doc-actions, .proj-chips { display: none !important; }
+  body, .main, main { background: #fff !important; padding: 0 !important; }
+  .card { box-shadow: none; break-inside: avoid; }
+  .arch-doc .snippet { -webkit-line-clamp: unset; }
+}
+
 /* ───────── موبایل و تبلت ───────── */
 @media (max-width: 960px) {
   .sidebar {

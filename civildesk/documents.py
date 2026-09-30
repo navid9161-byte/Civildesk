@@ -24,7 +24,7 @@ from typing import Any, BinaryIO, Iterator
 
 import numpy as np
 
-from . import db, embedder, textnorm
+from . import archive, db, embedder, textnorm
 from .config import settings
 
 log = logging.getLogger(__name__)
@@ -265,6 +265,9 @@ def add_document(fileobj: BinaryIO, filename: str, title: str | None = None,
             dup = conn.execute("SELECT * FROM documents WHERE sha256 = ?", (digest,)).fetchone()
             if dup:
                 os.unlink(tmp.name)
+                if project_id and dup["project_id"] is None:  # همان فایل، این بار داخل بایگانی یک پروژه
+                    conn.execute("UPDATE documents SET project_id=?, project_auto=0 WHERE id=?", (project_id, dup["id"]))
+                    dup = conn.execute("SELECT * FROM documents WHERE id = ?", (dup["id"],)).fetchone()
                 return {**dict(dup), "duplicate": True}
             now = db.now_str()
             cur = conn.execute(
@@ -366,10 +369,13 @@ def process_document(doc_id: int) -> None:
         pending.clear()
 
     total = 0
+    head_pages: list[tuple[int, str]] = []  # متن کامل صفحه‌های اول برای بایگانی (سطرها حفظ می‌شوند)
     for page_no, total, extract in iter_pages(Path(d["path"]), d["kind"]):
         if worker.stopping:
             return
         text, method = extract()
+        if page_no <= archive.ANALYZE_PAGES:
+            head_pages.append((page_no, textnorm.clean_display(text)))
         if method in ("ocr", "fixed", "weak"):
             stats[method] += 1
         for seq, chunk in enumerate(chunk_text(text)):
@@ -396,6 +402,10 @@ def process_document(doc_id: int) -> None:
     with db.connect() as conn:
         conn.execute("UPDATE documents SET status='ready', updated_at=? WHERE id=?", (db.now_str(), doc_id))
     _vector_cache.invalidate()
+    try:  # دسته‌بندی و استخراج اطلاعات برای بایگانی پروژه
+        archive.analyze(doc_id, head_pages)
+    except Exception:
+        log.exception("تحلیل سند %s برای بایگانی ناموفق بود", doc_id)
 
 
 def backfill_vectors(batch: int = 64) -> int:
@@ -470,6 +480,10 @@ class Worker:
             n += 1
 
     def _run(self) -> None:
+        try:
+            archive.analyze_pending()  # اسنادی که پیش از بخش بایگانی بارگذاری شده‌اند
+        except Exception:
+            log.exception("تحلیل اسناد قدیمی ناموفق بود")
         embedder.get_model()  # بارگذاری مدل در پس‌زمینه
         try:
             backfill_vectors()
