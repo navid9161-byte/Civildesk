@@ -18,7 +18,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import agent, db, documents, llm, services, telegram_bot
+from . import agent, archive, db, documents, llm, services, telegram_bot
 from .config import settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -217,13 +217,9 @@ def documents_reprocess(doc_id: int):
 
 
 @app.patch("/api/documents/{doc_id}")
-def documents_rename(doc_id: int, data: dict[str, Any]):
-    title = str(data.get("title") or "").strip()
-    if not title:
-        raise HTTPException(400, "عنوان خالی است")
-    documents.get_document(doc_id)
-    with db.connect() as conn:
-        conn.execute("UPDATE documents SET title=? WHERE id=?", (title, doc_id))
+def documents_update(doc_id: int, data: dict[str, Any]):
+    """ویرایش عنوان، پروژه، دسته، تاریخ، شماره و موضوع سند (اصلاح دستی در تحلیل دوباره حفظ می‌شود)."""
+    archive.update_meta(doc_id, data)
     return documents.get_document(doc_id)
 
 
@@ -237,6 +233,20 @@ def documents_file(doc_id: int):
 def documents_page(doc_id: int, page: int):
     return Response(documents.render_page_png(doc_id, page), media_type="image/png",
                     headers={"Cache-Control": "private, max-age=86400"})
+
+
+# ───────────────────────── بایگانی پروژه‌ها ─────────────────────────
+
+
+@app.get("/api/archive")
+def archive_overview():
+    return archive.overview()
+
+
+@app.get("/api/archive/{project_id}")
+def archive_project(project_id: int):
+    """خلاصه‌ی زنده و فهرست اسناد یک پروژه (۰ = اسناد بدون پروژه)."""
+    return archive.project_summary(project_id or None)
 
 
 class AskIn(BaseModel):

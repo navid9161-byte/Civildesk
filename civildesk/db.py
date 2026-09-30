@@ -320,6 +320,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
             updated_at TEXT
         )"""
     )
+    # بایگانی پروژه: دسته، اطلاعات استخراج‌شده و فیلدهایی که کاربر دستی اصلاح کرده
+    doc_cols = {r["name"] for r in conn.execute("PRAGMA table_info(documents)")}
+    for col, typ in (("category", "TEXT"), ("doc_date", "TEXT"), ("doc_no", "TEXT"), ("subject", "TEXT"),
+                     ("info", "TEXT"), ("edited", "TEXT"), ("project_auto", "INTEGER DEFAULT 0"),
+                     ("analyzed_at", "TEXT")):
+        if col not in doc_cols:
+            conn.execute(f"ALTER TABLE documents ADD COLUMN {col} {typ}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_project ON documents(project_id, category)")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS doc_chunks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
