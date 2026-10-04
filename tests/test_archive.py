@@ -47,6 +47,20 @@ MINUTES = """صورتجلسه بازدید کارگاه
 امضا
 """
 
+INVOICE = """صورت وضعیت موقت شماره ۵
+پروژه: برج ولیعصر
+دوره کارکرد: از تاریخ ۱۴۰۳/۰۵/۰۱ لغایت ۱۴۰۳/۰۵/۳۱
+خلاصه صورت وضعیت
+ردیف شرح مبلغ (ریال)
+۱ مبلغ کارکرد تا پایان این دوره ۴۵,۲۵۰,۰۰۰,۰۰۰
+۲ مبلغ کارکرد صورت وضعیت قبلی ۳۱,۱۰۰,۰۰۰,۰۰۰
+۳ مبلغ کارکرد این دوره ۱۴,۱۵۰,۰۰۰,۰۰۰
+۴ تعدیل ۱,۲۰۰,۰۰۰,۰۰۰
+۵ جمع کسورات (حسن انجام کار، بیمه، مالیات، پیش پرداخت) ۳,۴۵۰,۰۰۰,۰۰۰
+۶ خالص قابل پرداخت ۱۱,۹۰۰,۰۰۰,۰۰۰
+درصد پیشرفت فیزیکی: ۴۲٪
+"""
+
 GUARANTEE = """ضمانت‌نامه حسن انجام کار
 بانک ملت شعبه ونک
 به مبلغ ۴,۲۵۰,۰۰۰,۰۰۰ ریال
@@ -194,17 +208,41 @@ def test_summary_and_invoice_title():
 
 
 def test_project_story():
-    p = _project()
-    for text, name in ((CONTRACT, "c.txt"), (LETTER, "l.txt"), (MINUTES, "m.txt")):
+    p = _project(location="تهران")
+    for text, name in ((CONTRACT, "c.txt"), (LETTER, "l.txt"), (MINUTES, "m.txt"), (INVOICE, "وضعیت شماره ۵.txt")):
         _add(text, name, project_id=p["id"])
-    story = archive.project_summary(p["id"])["story"]
-    titles = [x["title"] for x in story]
-    assert titles[0] == "آغاز" and "مرداد 1403" in titles and "شهریور 1403" in titles
-    intro = story[0]["items"][0]["text"]
-    assert "85,000,000,000 ریال" in intro and "شرکت عمران شهر (کارفرما)" in intro and "18 ماه" in intro
-    letter = next(x for x in story if x["title"] == "مرداد 1403")["items"][0]
-    assert letter["text"].startswith("12 مرداد: نامه‌ی شماره‌ی 1403/ص/245") and letter["doc_id"]
-    assert story[-1]["title"].startswith("وضعیت امروز")
+    s = archive.project_summary(p["id"])
+    story = {x["title"]: " ".join(i["text"] for i in x["items"]) for x in s["story"]}
+    titles = list(story)
+    assert titles[:2] == ["در یک نگاه", "معرفی پروژه"] and "مرداد 1403" in titles and "وضعیت مالی" in titles
+    intro = story["معرفی پروژه"]
+    assert "در تهران" in intro and "شرکت عمران شهر به‌عنوان کارفرما" in intro and "85 میلیارد ریال" in intro
+    assert "کار از 1402/12/01 آغاز شده و باید تا 1404/06/01 به پایان برسد." in intro
+    aug = story["مرداد 1403"]
+    assert aug.startswith("در 12 مرداد، نامه‌ای به شماره‌ی 1403/ص/245") and "سپس در 31 مرداد، صورت‌وضعیت موقت شماره‌ی 5" in aug
+    assert "کارکرد این دوره 14٫15 میلیارد ریال" in aug and "(حدود 53٫2٪ مبلغ قرارداد)" in aug
+    assert "پیشرفت فیزیکی 42٪ است، یعنی حدود" in story["در یک نگاه"]
+    assert s["invoices"][0]["work_total"] == 45_250_000_000 and s["invoices"][0]["total_pct"] == 53.2
+    assert all(i.get("doc_id") for x in s["story"] if x["kind"] == "month" for i in x["items"])
+
+
+def test_invoice_summary_sheet():
+    info = archive.extract(archive._prep(INVOICE), "invoice")
+    v = {k: x["value"] for k, x in info.items() if isinstance(x, dict)}
+    assert v["invoice_kind"] == "موقت" and v["invoice_no"] == "5"
+    assert v["period"] == "1403/05/01 تا 1403/05/31" and v["doc_date"] == "1403/05/31"
+    assert (v["work_total"], v["work_prev"], v["work_period"]) == (45_250_000_000, 31_100_000_000, 14_150_000_000)
+    assert (v["adjustment"], v["deductions"], v["net"], v["progress"]) == (1_200_000_000, 3_450_000_000, 11_900_000_000, 42)
+    # ستون اعداد جدا از ستون شرح، و کارکرد این دوره از تفاضل
+    col = "وضعیت شماره ۲ - موقت\nکارکرد ماه خرداد ۱۴۰۴\nمبلغ کارکرد تا این صورت وضعیت\nمبلغ کارکرد قبلی\nخالص قابل پرداخت\n" \
+          "۲۰,۰۰۰,۰۰۰,۰۰۰\n۱۲,۵۰۰,۰۰۰,۰۰۰\n۶,۸۰۰,۰۰۰,۰۰۰\n"
+    v = {k: x["value"] for k, x in archive.extract(archive._prep(col), "invoice").items() if isinstance(x, dict)}
+    assert v["invoice_kind"] == "موقت" and v["period"] == "خرداد 1404"
+    assert (v["work_total"], v["work_prev"], v["net"], v["work_period"]) == (20_000_000_000, 12_500_000_000, 6_800_000_000, 7_500_000_000)
+    # برگه‌ی خلاصه‌ی ساخت‌یافته برای کارت سند
+    d = _add(INVOICE, "وضعیت شماره ۵.txt", project_id=_project()["id"])
+    brief = {r["label"]: r["value"] for r in archive.list_docs(d["project_id"])[0]["brief"]}
+    assert brief["کارکرد این دوره"] == 14_150_000_000 and brief["دوره‌ی کارکرد"] == "1403/05/01 تا 1403/05/31"
 
 
 def test_upgrade_requeues_garbage_and_reanalyzes():
@@ -218,3 +256,15 @@ def test_upgrade_requeues_garbage_and_reanalyzes():
     assert documents.get_document(d["id"])["status"] == "queued"
     assert documents.get_document(d["id"])["analyzed_at"] is None
     archive.upgrade()  # فقط یک بار
+
+
+def test_archived_invoice_to_record():
+    p = _project()
+    d = _add(INVOICE, "وضعیت شماره ۵.txt", project_id=p["id"])
+    rec = archive.to_invoice_record(d["id"])
+    assert rec["number"] == "5" and rec["kind"] == "interim" and rec["status"] == "submitted"
+    assert rec["gross_amount"] == 15_350_000_000 and rec["deductions"] == 3_450_000_000 and rec["net_amount"] == 11_900_000_000
+    assert (rec["period_start"], rec["period_end"]) == ("1403/05/01", "1403/05/31")
+    import pytest
+    with pytest.raises(db.ValidationError):
+        archive.to_invoice_record(d["id"])  # تکراری

@@ -427,12 +427,15 @@ def process_document(doc_id: int) -> None:
 
     total = 0
     head_pages: list[tuple[int, str]] = []  # متن کامل صفحه‌های اول برای بایگانی (سطرها حفظ می‌شوند)
+    tail_pages: list[tuple[int, str]] = []
     for page_no, total, extract in iter_pages(Path(d["path"]), d["kind"]):
         if worker.stopping:
             return
         text, method = extract()
         if page_no <= archive.ANALYZE_PAGES:
             head_pages.append((page_no, textnorm.clean_display(text)))
+        else:  # دو صفحه‌ی آخر هم (برگ خلاصه‌ی صورت‌وضعیت، امضاها) نگه داشته می‌شود
+            tail_pages = tail_pages[-1:] + [(page_no, textnorm.clean_display(text))]
         if method in ("ocr", "fixed", "weak"):
             stats[method] += 1
         for seq, chunk in enumerate(chunk_text(text)):
@@ -460,7 +463,7 @@ def process_document(doc_id: int) -> None:
         conn.execute("UPDATE documents SET status='ready', updated_at=? WHERE id=?", (db.now_str(), doc_id))
     _vector_cache.invalidate()
     try:  # دسته‌بندی و استخراج اطلاعات برای بایگانی پروژه
-        archive.analyze(doc_id, head_pages)
+        archive.analyze(doc_id, head_pages + (tail_pages if total > archive.ANALYZE_PAGES else []))
     except Exception:
         log.exception("تحلیل سند %s برای بایگانی ناموفق بود", doc_id)
 
