@@ -249,6 +249,12 @@ def archive_project(project_id: int):
     return archive.project_summary(project_id or None)
 
 
+@app.post("/api/archive/documents/{doc_id}/invoice", status_code=201)
+def archive_to_invoice(doc_id: int):
+    """ثبت صورت‌وضعیت بایگانی‌شده در بخش «صورت‌وضعیت‌ها»."""
+    return archive.to_invoice_record(doc_id)
+
+
 class AskIn(BaseModel):
     question: str
     doc_ids: list[int] | None = None

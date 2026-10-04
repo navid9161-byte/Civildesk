@@ -894,19 +894,30 @@ function summaryHTML(s) {
   if (s.amendments.length) rows.push(`<h4>📎 الحاقیه‌ها و تمدیدها</h4>` + s.amendments.map((a) => `<div class="row">
       <span class="badge gray">${faDigits(a.date)}</span>
       <span class="grow">${esc(a.subject || "")}${a.amount ? ` · ${money(a.amount)}` : ""}${a.duration ? ` · ${esc(faDigits(a.duration))}` : ""}</span>${srcLink(a)}</div>`).join(""));
-  if (s.last_invoice) {
-    const x = s.last_invoice;
-    rows.push(`<h4>🧾 آخرین صورت‌وضعیت (از ${num(s.invoices)})</h4><div class="row">
-      <span class="badge gray">${faDigits(x.date)}</span>
-      <span class="grow">${x.no ? `شماره ${num(x.no)}` : ""}${x.amount ? ` · ${money(x.amount)}` : ""}</span>${srcLink(x)}</div>`);
+  if (s.invoices.length) {
+    const cell = (v) => (v ? `<span title="${num(v)} ${META.currency}">${shortMoney(v)}</span>` : "—");
+    rows.push(`<h4>🧾 صورت‌وضعیت‌ها (${num(s.invoices.length)})</h4>
+      <div class="table-wrap"><table class="inv-table">
+        <thead><tr><th>شماره</th><th>دوره</th><th>کارکرد این دوره</th><th>جمع کارکرد</th><th>کسورات</th><th>خالص قابل پرداخت</th><th></th></tr></thead>
+        <tbody>${s.invoices.map((x) => `<tr>
+          <td>${x.no ? num(x.no) : "—"}${x.kind_fa ? ` <small class="muted">${esc(x.kind_fa)}</small>` : ""}</td>
+          <td>${esc(faDigits(x.period || x.date))}</td>
+          <td>${cell(x.work_period)}</td>
+          <td>${cell(x.work_total)}${x.total_pct ? ` <small class="muted">(${num(x.total_pct)}٪)</small>` : ""}</td>
+          <td>${cell(x.deductions)}</td>
+          <td><b>${cell(x.net)}</b></td>
+          <td>${x.check_failed ? `<span class="badge amber" title="جمع‌ها نمی‌خواند؛ با سند چک کنید">⚠️</span>` : ""}<a href="#" class="src-link" data-brief="${x.doc_id}" title="خلاصه‌ی سند">📋</a></td>
+        </tr>`).join("")}</tbody>
+      </table></div>`);
   }
   for (const m of s.minutes.slice(0, 1)) {
     rows.push(`<h4>📝 مصوبات آخرین صورتجلسه (${faDigits(m.date)})</h4><ol class="items">${m.items.map((i) => `<li>${esc(i)}</li>`).join("")}</ol><div class="row">${srcLink(m)}</div>`);
   }
-  const story = (s.story || []).map((p) => `<section>
-      <h4>${esc(faDigits(p.title))}</h4>
-      ${p.items.map((it) => `<p>${esc(faDigits(it.text))}${it.doc_id ? ` <a href="#" class="story-src" data-src="${it.doc_id}:${it.page || 1}:${it.kind}" title="${esc(it.doc_title)}">📄</a>` : ""}</p>`).join("")}
-    </section>`).join("");
+  // بندهای روایت: جمله‌ها پشت سر هم در یک پاراگراف، هر جمله با پیوند به سند منبعش
+  const sentence = (it) => `<span>${esc(faDigits(it.text))}${it.doc_id ? ` <a href="#" class="story-src" data-src="${it.doc_id}:${it.page || 1}:${it.kind}" title="${esc(it.doc_title)}">📄</a>` : ""}</span>`;
+  const story = (s.story || []).map((p) => p.kind === "glance"
+    ? `<div class="glance">${p.items.map(sentence).join(" ")}</div>`
+    : `<section class="${p.kind}"><h4>${esc(faDigits(p.title))}</h4><p>${p.items.map(sentence).join(" ")}</p></section>`).join("");
 
   return `${story ? `<div class="card story">
     <h3>📖 روایت پروژه <span class="count">از روی ${num(s.documents.filter((d) => d.status === "ready").length)} سند</span></h3>
@@ -921,6 +932,55 @@ function summaryHTML(s) {
     <p class="muted small">⚠️ این اطلاعات خودکار از متن اسناد خوانده شده؛ به‌خصوص در اسناد اسکن‌شده، اعداد را با سند اصلی چک کنید.</p>
   </div>`;
 }
+
+function shortMoney(v) {
+  // ۴۵٬۲۵۰٬۰۰۰٬۰۰۰ ← «۴۵٫۲۵ میلیارد»
+  for (const [div, word] of [[1e12, "هزار میلیارد"], [1e9, "میلیارد"], [1e6, "میلیون"]]) {
+    if (Math.abs(v) >= div) return `${faNum.format(Math.round((v / div) * 100) / 100)} ${word}`;
+  }
+  return num(v);
+}
+
+function showBrief(id) {
+  const d = archiveState.data?.documents.find((x) => x.id === Number(id));
+  if (!d) return;
+  const dlg = $("#docbrief");
+  const points = d.info?.points?.value || (d.info?.gist ? [d.info.gist.value] : []);
+  const items = d.info?.items?.value || [];
+  const viewable = d.kind === "pdf" || d.kind === "image";
+  $("#db-title").innerHTML = `${catLabel(d.category || "other")} · ${esc(d.subject || d.title)}`;
+  $("#db-body").innerHTML = `
+    <table class="brief">${d.brief.map((r) => `<tr><th>${esc(r.label)}</th><td>${r.money
+      ? `<b>${money(r.value)}</b> <small class="muted">(${shortMoney(r.value)}${r.computed ? "، محاسبه‌شده" : ""})</small>`
+      : esc(faDigits(r.value))}${r.page && d.pages > 1 ? ` <a href="#" class="src-link" data-src="${d.id}:${r.page}:${d.kind}">ص ${num(r.page)}</a>` : ""}</td></tr>`).join("")}</table>
+    ${items.length ? `<h4>مصوبات</h4><ol class="items">${items.map((i) => `<li>${esc(faDigits(i))}</li>`).join("")}</ol>` : ""}
+    ${points.length ? `<h4>خلاصه‌ی متن</h4><ul class="points">${points.map((p) => `<li>${esc(faDigits(p))}</li>`).join("")}</ul>`
+      : d.info?.table ? `<p class="muted">📊 متن این سند بیشتر جدول و عدد است.</p>` : ""}
+    <p class="muted small">${esc(d.title)} · ${d.pages ? `${num(d.pages)} صفحه · ` : ""}${d.ocr_pages ? "خوانده‌شده با OCR؛ اعداد را با سند چک کنید" : ""}</p>
+    <div class="modal-actions">
+      ${viewable ? `<button class="btn" data-src="${d.id}:1:${d.kind}">👁 دیدن سند</button>` : ""}
+      <a class="btn" href="/api/documents/${d.id}/file" target="_blank">📄 فایل اصلی</a>
+      ${d.category === "invoice" && d.project_id ? `<button class="btn gold" id="db-inv">ثبت در بخش صورت‌وضعیت</button>` : ""}
+      <button class="btn" id="db-edit">✏️ اصلاح</button>
+    </div>`;
+  $("#db-close").onclick = () => dlg.close();
+  $("#db-edit").onclick = () => { dlg.close(); editDocMeta(d); };
+  const inv = $("#db-inv");
+  if (inv) inv.onclick = async () => {
+    try {
+      await api(`/api/archive/documents/${d.id}/invoice`, { method: "POST" });
+      toast("در بخش صورت‌وضعیت ثبت شد ✔ (وضعیت: ارسال‌شده)");
+    } catch (err) { toast(err.message); }
+  };
+  dlg.querySelectorAll("[data-src]").forEach((b) => b.addEventListener("click", () => dlg.close()));
+  dlg.showModal();
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-brief]");
+  if (!b || e.target.closest("a[href]:not([href='#']), button:not([data-brief]), input")) return;
+  e.preventDefault();
+  showBrief(b.dataset.brief);
+});
 
 function addDaysStr(jdate, n) {
   // مقایسه‌ی تقریبی برای «نزدیک»: فقط روز ماه را جلو می‌برد (کافی برای رنگ برچسب)
@@ -947,15 +1007,20 @@ function renderArchiveList() {
     const prog = d.status === "processing" && d.pages ? Math.round((100 * d.pages_done) / d.pages) : null;
     const viewable = d.kind === "pdf" || d.kind === "image";
     const gist = d.info?.gist?.value;
+    const inv = d.category === "invoice" ? d.info || {} : null;
     return `<div class="doc arch-doc">
-      <div class="body">
+      <div class="body" data-brief="${d.id}" title="دیدن خلاصه‌ی کامل">
         <div class="title">${d.category ? `<span class="badge cat">${catLabel(d.category)}</span> ` : ""}${esc(d.subject || d.title)}</div>
         <div class="meta">
           ${d.status !== "ready" ? `<span class="badge ${d.status === "error" ? "red" : "amber"}">${STATUS_FA[d.status] || d.status}${prog !== null ? ` ${num(prog)}٪` : ""}</span>` : ""}
           <span>📅 ${faDigits(d.date)}${d.doc_date ? "" : " (بارگذاری)"}</span>
           ${d.doc_no ? `<span>شماره ${esc(faDigits(d.doc_no))}</span>` : ""}
           ${d.info?.to ? `<span>به: ${esc(d.info.to.value.slice(0, 50))}</span>` : ""}
-          ${d.info?.amount ? `<span>💰 ${money(d.info.amount.value)}</span>` : ""}
+          ${inv?.period ? `<span>دوره: ${esc(faDigits(inv.period.value))}</span>` : ""}
+          ${inv?.work_period ? `<span>کارکرد دوره: <b>${shortMoney(inv.work_period.value)}</b></span>` : ""}
+          ${inv?.work_total ? `<span>جمع کارکرد: ${shortMoney(inv.work_total.value)}</span>` : ""}
+          ${inv?.net ? `<span>خالص: <b>${shortMoney(inv.net.value)}</b></span>` : ""}
+          ${!inv && d.info?.amount ? `<span>💰 ${money(d.info.amount.value)}</span>` : ""}
           ${d.pages > 1 ? `<span>${num(d.pages)} صفحه</span>` : ""}
           ${d.ocr_pages ? `<span title="از روی تصویر خوانده شده">🔍 OCR</span>` : ""}
           ${d.project_auto ? `<span class="badge gray" title="پروژه از روی متن سند تشخیص داده شد">🔗 وصل خودکار</span>` : ""}

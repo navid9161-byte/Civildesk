@@ -13,7 +13,7 @@ import re
 import unicodedata
 from typing import Any
 
-from . import db, jalali, textnorm
+from . import db, jalali, story, textnorm
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ CATEGORIES: dict[str, str] = {
 }
 EDITABLE = ("category", "doc_date", "doc_no", "subject")
 ANALYZE_PAGES = 12  # فقط صفحه‌های اول برای تشخیص، استخراج و خلاصه
-ARCHIVE_VERSION = "2"  # با تغییر آن، همه‌ی اسناد یک بار دوباره تحلیل می‌شوند
+ARCHIVE_VERSION = "3"  # با تغییر آن، همه‌ی اسناد یک بار دوباره تحلیل می‌شوند
 
 # واژه‌های هر دسته (به شکل یکسان‌شده‌ی textnorm.normalize)
 _KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -170,6 +170,100 @@ def _line_after(text: str, pattern: str, maxlen: int = 160) -> tuple[int, str] |
     val = re.split(r"\s{3,}|\s(?:شماره|تاریخ|پیوست)\s*:", m.group(m.lastindex))[0]
     val = val.strip(" :.-–،")
     return (m.start(), val[:maxlen]) if len(val) >= 3 else None
+
+
+# ───────────────────────── صورت‌وضعیت ─────────────────────────
+
+W = r"[\s‌]*"
+_MONTHS = "|".join(jalali.MONTHS_FA)
+_BIGNUM = re.compile(r"(?<![\d/\-.,])\(?(\d{1,3}(?:[,.]\d{3})+|\d{6,})\)?(?![\d/\-]|[.,]\d)")
+# برچسب ردیف‌های برگ خلاصه‌ی صورت‌وضعیت (به ترتیب رایج)
+INVOICE_ROWS: tuple[tuple[str, str, str], ...] = (
+    ("work_total", "جمع کارکرد تا این صورت‌وضعیت",
+     r"(?:مبلغ|جمع)" + W + r"(?:کل" + W + r")?(?:کارکرد|کار" + W + r"انجام" + W + r"شده)" + W +
+     r"(?:تجمعی|کل|تا" + W + r"(?:این|پایان|کنون|تاریخ|آخر))"),
+    ("work_prev", "کارکرد صورت‌وضعیت قبلی",
+     r"(?:کارکرد|صورت" + W + r"وضعیت)" + W + r"(?:ها" + W + r"ی" + W + r")?(?:قبلی|قبل|گذشته|پیشین)"),
+    ("work_period", "کارکرد این دوره",
+     r"کارکرد" + W + r"(?:این" + W + r"(?:دوره|صورت" + W + r"وضعیت|مرحله|ماه)|(?:در" + W + r")?دوره(?!" + W + r"(?:قبل|ی" + W + r"قبل)))"),
+    ("adjustment", "تعدیل", r"(?:مبلغ" + W + r")?تعدیل"),
+    ("deductions", "جمع کسورات", r"(?:جمع" + W + r")?کسور(?:ات)?"),
+    ("net", "خالص قابل پرداخت",
+     r"(?:خالص" + W + r"(?:قابل" + W + r")?پرداخت|مبلغ" + W + r"قابل" + W + r"پرداخت|خالص" + W + r"صورت" + W + r"وضعیت)"),
+)
+INVOICE_LABELS = {k: lbl for k, lbl, _ in INVOICE_ROWS}
+
+
+def invoice_fields(text: str, flat: str) -> dict[str, Any]:
+    """اطلاعات برگ خلاصه‌ی صورت‌وضعیت: نوع، شماره، دوره، کارکرد قبلی/این دوره/تجمعی، تعدیل، کسورات، خالص، پیشرفت.
+
+    مبالغ جدول معمولاً «ریال» ندارند؛ برای هر برچسب، اولین عدد بزرگ استفاده‌نشده بعد از آن (یا اگر نبود، قبل از آن)
+    برداشته می‌شود. برچسب‌ها به ترتیب جایشان در متن پردازش می‌شوند تا ستون اعداد جدا از ستون شرح هم درست جفت شود.
+    """
+    info: dict[str, Any] = {}
+    km = re.search(r"(?:صورت" + W + r")?وضعیت" + W + r"(?:شماره" + W + r"\d{1,3}" + W + r")?[-–:]?" + W +
+                   r"(موقت|قطعی|تعدیل|نهایی)", flat)
+    if km:
+        info["invoice_kind"] = {"pos": km.start(), "value": "قطعی" if km.group(1) == "نهایی" else km.group(1)}
+    im = (re.search(r"(?:صورت" + W + r")?وضعیت" + W + r"(?:موقت|قطعی|تعدیل)?" + W +
+                    r"(?:شماره|ش\.?|No\.?)" + W + r"[:.]?" + W + r"(\d{1,3})(?!\d)", flat)
+          or re.search(r"شماره" + W + r"(?:صورت" + W + r")?وضعیت" + W + r"[:.]?" + W + r"(\d{1,3})(?!\d)", flat)
+          or re.search(r"صورت" + W + r"وضعیت" + W + r"(?:موقت|قطعی)?" + W + r"(\d{1,3})(?![\d/])", flat))
+    if im:
+        info["invoice_no"] = {"pos": im.start(), "value": im.group(1)}
+
+    # دوره‌ی کارکرد
+    for pm in re.finditer(r"(?:دوره|از" + W + r"تاریخ|کارکرد" + W + r"از|مدت" + W + r"کارکرد)", flat):
+        ds = [(p + pm.end(), d) for p, d in _dates(flat[pm.end(): pm.end() + 90])]
+        if len(ds) >= 2 and ds[0][1] < ds[1][1]:
+            info["period"] = {"pos": pm.start(), "value": f"{ds[0][1]} تا {ds[1][1]}", "from": ds[0][1], "to": ds[1][1]}
+            break
+    if "period" not in info:
+        mm = re.search(rf"(?:ماه|دوره|کارکرد)[^\n\d]{{0,12}}?({_MONTHS})(?:" + W + rf"(?:تا|الی|لغایت|-)" + W +
+                       rf"({_MONTHS}))?" + W + r"(?:ماه" + W + r")?(?:سال" + W + r")?(1[34]\d\d)", flat)
+        if mm:
+            label = f"{mm.group(1)}{' تا ' + mm.group(2) if mm.group(2) else ''} {mm.group(3)}"
+            info["period"] = {"pos": mm.start(), "value": label}
+    if "period" not in info:
+        te = _date_after(flat, r"(?:تا|لغایت)" + W + r"(?:تاریخ|پایان)", 30)
+        if te:
+            info["period"] = {"pos": te[0], "value": f"تا {te[1]}", "to": te[1]}
+
+    # مبالغ برگ خلاصه
+    found = []
+    for key, _, pat in INVOICE_ROWS:
+        m = re.search(pat, flat)
+        if m:
+            found.append((m.start(), m.end(), key))
+    used: set[int] = set()
+    for start, end, key in sorted(found):
+        val = None
+        for nm in _BIGNUM.finditer(flat, end, min(len(flat), end + 320)):
+            v = int(re.sub(r"\D", "", nm.group(1)))
+            if nm.start() not in used and v >= 100000:
+                val, pos = v, nm.start()
+                break
+        if val is None:  # جدول با ترتیب برعکس: عدد قبل از شرح
+            before = [nm for nm in _BIGNUM.finditer(flat, max(0, start - 140), start)
+                      if nm.start() not in used and int(re.sub(r"\D", "", nm.group(1))) >= 100000]
+            if before:
+                val, pos = int(re.sub(r"\D", "", before[-1].group(1))), before[-1].start()
+        if val is not None:
+            used.add(pos)
+            info[key] = {"pos": start, "value": val}
+    tot, prev, per = (info.get(k, {}).get("value") for k in ("work_total", "work_prev", "work_period"))
+    if per is None and tot and prev is not None and tot > prev:
+        info["work_period"] = {"pos": info["work_total"]["pos"], "value": tot - prev, "computed": True}
+    elif tot is None and per and prev is not None:
+        info["work_total"] = {"pos": info["work_period"]["pos"], "value": per + prev, "computed": True}
+    elif tot and prev is not None and per and abs(tot - prev - per) > 0.02 * tot:
+        info["work_check"] = {"pos": 0, "value": False}  # جمع‌ها نمی‌خواند؛ احتمالاً یک عدد اشتباه خوانده شده
+
+    pg = re.search(r"(?:درصد" + W + r"پیشرفت|پیشرفت" + W + r"(?:فیزیکی|کار|کل|واقعی)?)[^\d\n]{0,15}?"
+                   r"(\d{1,3}(?:[./]\d{1,2})?)" + W + r"(?:%|٪|درصد)", flat)
+    if pg and float(pg.group(1).replace("/", ".")) <= 100:
+        info["progress"] = {"pos": pg.start(), "value": float(pg.group(1).replace("/", "."))}
+    return info
 
 
 # ───────────────────────── خلاصه‌ی استخراجی ─────────────────────────
@@ -326,10 +420,11 @@ def extract(text: str, category: str) -> dict[str, Any]:
 
     # خلاصه: مهم‌ترین جمله‌های سند (برای نامه‌ها، از متن بعد از سلام)
     sm = re.search(r"(احتراما[ًٌء]?|با\s+سلام[^\n]{0,30}?(?:احترام|\n)|سلام\s+علیکم)", text[:2000])
-    summary = summarize(text[sm.end():] if sm and category in ("letter", "order") else text,
-                        3 if category in ("contract", "amendment", "report", "other") else 2)
+    summary = [] if category == "invoice" else summarize(text[sm.end():] if sm and category in ("letter", "order") else text,
+                        {"contract": 6, "amendment": 5, "report": 5, "minutes": 4, "invoice": 2}.get(category, 4))
     if summary:
-        info["gist"] = {"pos": 0, "value": " ".join(summary)}
+        info["gist"] = {"pos": 0, "value": " ".join(summary[:3])}
+        info["points"] = {"pos": 0, "value": summary}
     elif _numeric_share(text) > 0.35:
         info["table"] = {"pos": 0, "value": True}  # بیشتر جدول و عدد است (مثلاً صورت‌وضعیت)
 
@@ -382,9 +477,14 @@ def extract(text: str, category: str) -> dict[str, Any]:
             if (info.get("doc_date") or {}).get("guessed") and info["doc_date"]["value"] == vu[1]:
                 del info["doc_date"]  # تاریخ سررسید، تاریخ صدور نیست
     if category == "invoice":
-        im = re.search(r"صورت" + SP + r"وضعیت\s+(?:موقت\s+|قطعی\s+)?(?:شماره\s*|ش\s*)?(\d{1,3})(?!\d)", flat)
-        if im:
-            info["invoice_no"] = {"pos": im.start(), "value": im.group(1)}
+        info.update(invoice_fields(text, flat))
+        to = (info.get("period") or {}).get("to")
+        if to and (info.get("doc_date") or {}).get("guessed", True):  # تاریخ صورت‌وضعیت = پایان دوره
+            info["doc_date"] = {"pos": info["period"]["pos"], "value": to, "guessed": True}
+        if "net" in info:  # مبلغ اصلی صورت‌وضعیت = خالص قابل پرداخت (یا کارکرد این دوره)
+            info["amount"] = {"pos": info["net"]["pos"], "value": info["net"]["value"], "context": "خالص قابل پرداخت"}
+        elif "work_period" in info:
+            info["amount"] = {"pos": info["work_period"]["pos"], "value": info["work_period"]["value"], "context": "کارکرد این دوره"}
 
     # مهلت انجام کار (فقط در نامه‌ها، دستورها و صورتجلسه‌ها)
     dl = None if category not in ("letter", "order", "minutes", "other") else re.search(r"(?:ظرف|حداکثر\s+ظرف|حداکثر\s+تا|طی)\s*(?:مدت\s*)?" + _NUM + r"\s*\(?[^\n)]{0,15}\)?\s*(روز|هفته|ماه)", flat)
@@ -432,7 +532,7 @@ def _doc_text(conn, doc_id: int, page_texts: list[tuple[int, str]] | None) -> tu
             )]
     else:
         keep, size = [], 0
-        for page, raw in page_texts[:ANALYZE_PAGES]:
+        for page, raw in page_texts[: ANALYZE_PAGES + 2]:
             keep.append((page, raw[:20000]))
             size += len(raw)
             if size > 80000:
@@ -458,6 +558,10 @@ def analyze(doc_id: int, page_texts: list[tuple[int, str]] | None = None) -> dic
         edited = set(json.loads(d["edited"] or "[]"))
         category = d["category"] if "category" in edited else classify(d["title"], text, d["kind"], d["pages"] or 1)
         info = extract(text, category) if text.strip() else {}
+        if category == "invoice" and "invoice_no" not in info:  # «وضعیت شماره ۳.pdf»
+            tm = re.search(r"(\d{1,3})(?!\d)", _prep(d["title"]))
+            if tm:
+                info["invoice_no"] = {"pos": 0, "value": tm.group(1)}
         for v in info.values():  # موقعیت در متن ← شماره‌ی صفحه
             items = v if isinstance(v, list) else [v]
             for it in items:
@@ -584,11 +688,53 @@ def _end_from_duration(start: str, n: int, unit: str) -> str | None:
         return None
 
 
+def doc_brief(d: dict) -> list[dict[str, Any]]:
+    """خلاصه‌ی ساخت‌یافته‌ی یک سند (برچسب، مقدار) بسته به نوعش؛ برای کارت خلاصه‌ی سند."""
+    info, cat = d["info"], d.get("category") or "other"
+    rows: list[dict[str, Any]] = []
+
+    def add(label: str, key: str | None = None, value: Any = None, money: bool = False, **extra: Any) -> None:
+        item = info.get(key) if key else None
+        v = value if value is not None else (item or {}).get("value")
+        if v not in (None, "", []):
+            rows.append({"label": label, "value": v, "money": money, "page": (item or {}).get("page"), **extra})
+
+    add("نوع سند", value=CATEGORIES.get(cat))
+    if cat == "invoice":
+        add("نوع صورت‌وضعیت", "invoice_kind")
+        add("شماره‌ی صورت‌وضعیت", "invoice_no")
+        add("دوره‌ی کارکرد", "period")
+        for key, label, _ in INVOICE_ROWS:
+            add(label, key, money=True, computed=bool((info.get(key) or {}).get("computed")))
+        add("درصد پیشرفت", value=f"{info['progress']['value']:g}٪" if info.get("progress") else None)
+        if info.get("work_check"):
+            rows.append({"label": "⚠️ کنترل جمع", "value": "کارکرد قبلی + این دوره با جمع کارکرد نمی‌خواند؛ اعداد را با سند چک کنید"})
+    else:
+        add("شماره", value=d.get("doc_no"))
+        add("تاریخ", value=d.get("doc_date"))
+        add("موضوع", value=d.get("subject"))
+        add("گیرنده", "to")
+        add("فرستنده", "from")
+        for key, label in (("employer", "کارفرما"), ("contractor", "پیمانکار"), ("consultant", "مشاور")):
+            add(label, key)
+        add("مبلغ", "amount", money=True)
+        add("مدت", "duration")
+        add("تاریخ شروع", "start_date")
+        add("تاریخ پایان", "end_date")
+        add("اعتبار تا", "valid_until")
+        dl = info.get("deadline")
+        if dl:
+            add("مهلت", value=dl.get("date") or dl["value"])
+    return rows
+
+
 def _doc_row(r) -> dict[str, Any]:
     d = dict(r)
+    d.pop("head_text", None)
     d["info"] = json.loads(d.get("info") or "{}")
     d["edited"] = json.loads(d.get("edited") or "[]")
     d["date"] = d.get("doc_date") or (d.get("created_at") or "")[:10]
+    d["brief"] = doc_brief(d)
     return d
 
 
@@ -617,151 +763,6 @@ def overview() -> dict[str, Any]:
 
 def _src(d: dict, item: dict | None = None) -> dict[str, Any]:
     return {"doc_id": d["id"], "doc_title": d["title"], "page": (item or {}).get("page", 1), "kind": d["kind"]}
-
-
-# ───────────────────────── روایت پروژه ─────────────────────────
-
-
-def _money(v: int | None) -> str:
-    return f"{v:,} ریال" if v else ""
-
-
-def _day_month(jdate: str) -> str:
-    y, m, d = (int(x) for x in jdate.split("/"))
-    return f"{d} {jalali.MONTHS_FA[m - 1]}"
-
-
-def _quote(s: str | None, limit: int = 120) -> str:
-    s = " ".join((s or "").split()).strip(" .،:")
-    return f"«{s if len(s) <= limit else s[:limit].rsplit(' ', 1)[0] + '…'}»" if s else ""
-
-
-def _event_sentence(d: dict) -> str:
-    """یک جمله‌ی روایی برای هر سند، بسته به نوعش."""
-    info, cat = d["info"], d.get("category") or "other"
-    subj = _quote(d.get("subject"))
-    title = _quote(d["title"])
-    amount = (info.get("amount") or {}).get("value")
-    amt = f" به مبلغ {_money(amount)}" if amount else ""
-    no = f" شماره‌ی {d['doc_no']}" if d.get("doc_no") else ""
-    gist = (info.get("gist") or {}).get("value")
-    if cat == "letter":
-        to = (info.get("to") or {}).get("value")
-        s = f"نامه‌ی{no or ''}{' خطاب به ' + to if to else ''}{' با موضوع ' + subj if subj else ''} نوشته شد."
-        if not no and not to and not subj:
-            s = f"نامه‌ی {title} بایگانی شد."
-    elif cat == "order":
-        s = f"دستور کار / ابلاغیه‌ی{no} {subj or title} صادر شد."
-    elif cat == "minutes":
-        items = (info.get("items") or {}).get("value") or []
-        s = f"جلسه‌ای{' با موضوع ' + subj if subj else ''} برگزار شد"
-        if items:
-            s += " و مقرر شد: " + "؛ ".join(i.rstrip(".") for i in items[:3]) + "."
-            gist = None
-        else:
-            s += "."
-    elif cat == "amendment":
-        du = (info.get("duration") or {}).get("value")
-        s = f"الحاقیه / تمدید {subj or title}{amt}{' با مدت ' + du if du else ''} تنظیم شد."
-    elif cat == "invoice":
-        n = (info.get("invoice_no") or {}).get("value")
-        s = f"صورت‌وضعیت{' شماره‌ی ' + n if n else ' ' + title}{amt} تهیه شد."
-        gist = None
-    elif cat == "guarantee":
-        vu = (info.get("valid_until") or {}).get("value")
-        s = f"ضمانت‌نامه‌ی {subj or title}{amt}{' با اعتبار تا ' + vu if vu else ''} صادر شد."
-        gist = None
-    elif cat == "contract":
-        s = f"قرارداد{no} {subj or title}{amt} منعقد شد."
-    elif cat == "report":
-        s = f"گزارش {subj or title} تهیه شد."
-    elif cat == "financial":
-        s = f"سند مالی {title}{amt} ثبت شد."
-    else:
-        s = f"{CATEGORIES.get(cat, 'سند')} {subj or title} بایگانی شد."
-    if gist:
-        first = gist if len(gist) <= 260 else gist[:260].rsplit(" ", 1)[0] + "…"
-        s += f" در آن آمده است: «{first}»"
-    return s
-
-
-def build_story(project: dict, ready: list[dict], contract: dict | None, facts: dict[str, Any],
-                deadlines: list[dict], guarantees: list[dict], today: str) -> list[dict[str, Any]]:
-    """روایت زمانی پروژه از روی اسناد: مقدمه از قرارداد، رویدادها ماه به ماه، و وضعیت امروز.
-
-    خروجی: بندهایی با عنوان و جمله‌هایی که هرکدام به سند منبعش پیوند دارد.
-    """
-    paras: list[dict[str, Any]] = []
-    name = project["name"]
-    if contract:
-        intro = f"پروژه‌ی «{name}»"
-        if facts.get("subject"):
-            intro += f" با موضوع {_quote(facts['subject'], 160)}"
-        intro += " بر اساس قرارداد"
-        if facts.get("contract_no"):
-            intro += f" شماره‌ی {facts['contract_no']}"
-        if facts.get("contract_date"):
-            intro += f" مورخ {facts['contract_date']}"
-        parties = [f"{facts[k]} ({lbl})" for k, lbl in (("employer", "کارفرما"), ("contractor", "پیمانکار"),
-                                                        ("consultant", "مشاور")) if facts.get(k)]
-        if parties:
-            intro += " میان " + " و ".join(parties)
-        if facts.get("contract_amount"):
-            intro += f" به مبلغ {_money(facts['contract_amount'])}"
-        if facts.get("duration"):
-            intro += f" و مدت {facts['duration']}"
-        intro += " منعقد شده است."
-        if facts.get("start_date") or facts.get("end_date"):
-            intro += " " + "، ".join(x for x in (
-                f"تاریخ شروع {facts['start_date']}" if facts.get("start_date") else "",
-                f"تاریخ پایان {facts['end_date']}" if facts.get("end_date") else "") if x) + " است."
-        paras.append({"title": "آغاز", "items": [{"text": intro, **_src(contract)}]})
-
-    dated = sorted((d for d in ready if d.get("doc_date") and d is not contract), key=lambda d: (d["doc_date"], d["id"]))
-    month_key, seen = None, set()
-    for d in dated:
-        key = (d["doc_date"], d.get("category"), d.get("doc_no") or d.get("subject") or d["id"])
-        if key in seen:  # نسخه‌ی دیگری از همان سند (مثلاً اسکن و عکس)
-            continue
-        seen.add(key)
-        y, m, _ = d["doc_date"].split("/")
-        if (y, m) != month_key:
-            month_key = (y, m)
-            paras.append({"title": f"{jalali.MONTHS_FA[int(m) - 1]} {int(y)}", "items": []})
-        paras[-1]["items"].append({"text": f"{_day_month(d['doc_date'])}: {_event_sentence(d)}", **_src(d)})
-
-    undated = [d for d in ready if not d.get("doc_date") and d is not contract]
-    if undated:
-        paras.append({"title": "اسناد بدون تاریخ مشخص", "items": [
-            {"text": _event_sentence(d), **_src(d)} for d in sorted(undated, key=lambda d: d["id"])]})
-
-    now = []
-    end = facts.get("end_date")
-    if end:
-        try:
-            left = jalali.days_between(today, end)
-            now.append(f"تا پایان مدت قرارداد ({end}) {left} روز مانده است." if left >= 0
-                       else f"مدت قرارداد {-left} روز پیش ({end}) به پایان رسیده است؛ اگر تمدید شده، الحاقیه‌اش را بارگذاری کنید.")
-        except ValueError:
-            pass
-    late = [x for x in deadlines if x["late"]]
-    coming = [x for x in deadlines if not x["late"]]
-    if coming:
-        now.append(f"{len(coming)} مهلت پیش رو هست؛ نزدیک‌ترین: {coming[0]['due']} ({_quote(coming[0]['text'], 90)}).")
-    if late:
-        now.append(f"مهلت {len(late)} مورد از نامه‌ها و صورتجلسه‌ها گذشته است؛ اگر انجام شده، نگرانی نیست.")
-    exp = [g for g in guarantees if g["state"] == "expired"]
-    soon = [g for g in guarantees if g["state"] == "soon"]
-    if exp:
-        now.append(f"{len(exp)} ضمانت‌نامه منقضی شده است.")
-    if soon:
-        now.append(f"{len(soon)} ضمانت‌نامه تا یک ماه دیگر سررسید می‌شود ({soon[0]['valid_until']}).")
-    if ready:
-        last = max(ready, key=lambda d: (d["date"], d["id"]))
-        now.append(f"آخرین سند بایگانی‌شده {_quote(last.get('subject') or last['title'], 90)} مورخ {last['date']} است.")
-    if now:
-        paras.append({"title": f"وضعیت امروز ({today})", "items": [{"text": t} for t in now]})
-    return paras
 
 
 def project_summary(project_id: int | None) -> dict[str, Any]:
@@ -812,12 +813,24 @@ def project_summary(project_id: int | None) -> dict[str, Any]:
         **_src(d),
     } for d in sorted(by_cat.get("amendment", []), key=lambda d: d["date"])]
 
-    invoices = sorted(by_cat.get("invoice", []), key=lambda d: (d["date"], d["id"]))
-    last_invoice = None
-    if invoices:
-        d = invoices[-1]
-        last_invoice = {"date": d["date"], "no": (d["info"].get("invoice_no") or {}).get("value"),
-                        "amount": (d["info"].get("amount") or {}).get("value"), **_src(d, d["info"].get("amount"))}
+    def inv_key(d: dict) -> tuple:
+        n = (d["info"].get("invoice_no") or {}).get("value")
+        return (int(n) if n and str(n).isdigit() else 10**6, d["date"], d["id"])
+
+    invoices = []
+    for d in sorted(by_cat.get("invoice", []), key=inv_key):
+        i = d["info"]
+        invoices.append({
+            "date": d["date"], "no": (i.get("invoice_no") or {}).get("value"),
+            "kind_fa": (i.get("invoice_kind") or {}).get("value"), "period": (i.get("period") or {}).get("value"),
+            **{k: (i.get(k) or {}).get("value") for k, _, _ in INVOICE_ROWS},
+            "progress": (i.get("progress") or {}).get("value"), "check_failed": bool(i.get("work_check")),
+            **_src(d, i.get("work_total") or i.get("net") or i.get("amount")),
+        })
+    last_invoice = invoices[-1] if invoices else None
+    contract_amount = next((f["value"] for f in facts if f["key"] == "contract_amount"), None) or (project or {}).get("contract_amount")
+    for x in invoices:
+        x["total_pct"] = round(100 * x["work_total"] / contract_amount, 1) if x.get("work_total") and contract_amount else None
 
     today = db.today_str()
     guarantees = []
@@ -866,8 +879,8 @@ def project_summary(project_id: int | None) -> dict[str, Any]:
             if field and not project.get(field):
                 suggestions.append({"field": field, "label": labels[field], "value": f["value"], "money": f.get("money", False)})
 
-    story = build_story(project, ready, contract, {f["key"]: f["value"] for f in facts},
-                        deadlines, guarantees, today) if project else []
+    narrative = story.build(project, ready, contract, {f["key"]: f["value"] for f in facts},
+                            deadlines, guarantees, invoices, today, _src) if project else []
 
     timeline = [{
         "id": d["id"], "date": d["date"], "category": d.get("category") or "other", "title": d["title"],
@@ -876,9 +889,44 @@ def project_summary(project_id: int | None) -> dict[str, Any]:
 
     return {
         "project": project, "documents": docs, "counts": counts, "categories": CATEGORIES,
-        "facts": facts, "amendments": amendments, "last_invoice": last_invoice, "invoices": len(invoices),
+        "facts": facts, "amendments": amendments, "last_invoice": last_invoice, "invoices": invoices,
         "guarantees": guarantees, "deadlines": deadlines[:12], "minutes": minutes, "suggestions": suggestions,
-        "timeline": timeline, "story": story, "today": today,
+        "timeline": timeline, "story": narrative, "today": today,
         "pending": sum(1 for d in docs if d["status"] in ("queued", "processing")),
         "last_update": max((d.get("analyzed_at") or "" for d in docs), default="") or None,
     }
+
+
+def to_invoice_record(doc_id: int) -> dict[str, Any]:
+    """ثبت صورت‌وضعیتِ بایگانی‌شده در بخش «صورت‌وضعیت‌ها» (برای پیگیری تأیید و پرداخت)."""
+    d = next((x for x in list_docs_by_id(doc_id)), None)
+    if not d:
+        raise db.NotFound("سند پیدا نشد")
+    if d.get("category") != "invoice":
+        raise db.ValidationError("این سند صورت‌وضعیت نیست")
+    if not d.get("project_id"):
+        raise db.ValidationError("اول پروژه‌ی این سند را مشخص کنید")
+    i = d["info"]
+    val = lambda k: (i.get(k) or {}).get("value")  # noqa: E731
+    gross = (val("work_period") or 0) + (val("adjustment") or 0) or val("net")
+    if not gross:
+        raise db.ValidationError("مبلغ کارکرد این دوره از سند خوانده نشد؛ صورت‌وضعیت را دستی ثبت کنید")
+    number = str(val("invoice_no") or d["title"])
+    period = i.get("period") or {}
+    with db.connect() as conn:
+        if conn.execute("SELECT 1 FROM invoices WHERE project_id = ? AND number = ?", (d["project_id"], number)).fetchone():
+            raise db.ValidationError(f"صورت‌وضعیت شماره‌ی {number} برای این پروژه قبلاً ثبت شده است")
+        return db.create(conn, "invoices", {
+            "project_id": d["project_id"], "number": number,
+            "kind": {"موقت": "interim", "قطعی": "final", "تعدیل": "adjustment"}.get(val("invoice_kind"), "interim"),
+            "period_start": period.get("from"), "period_end": period.get("to"),
+            "gross_amount": gross, "deductions": val("deductions") or 0, "net_amount": val("net"),
+            "status": "submitted", "submit_date": d.get("doc_date"),
+            "notes": f"از بایگانی: {d['title']}",
+        })
+
+
+def list_docs_by_id(doc_id: int) -> list[dict[str, Any]]:
+    with db.connect() as conn:
+        rows = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchall()
+    return [_doc_row(r) for r in rows]
