@@ -23,6 +23,17 @@ QUERY_STOPWORDS = STOPWORDS | frozenset(
     چی کجا کی چرا مقدار میزان""".split()
 )
 
+# کلمات کوتاه رایج انگلیسی؛ متن لاتین بی‌معنی (OCR اشتباه یا قلم خراب) پر از کلمات کوتاه بی‌معنی است
+EN_STOP = frozenset(
+    """the of and to in a an is are for on with by as be this that shall or any all from at its it which will
+    not such other under has have been was were no if may between said upon into per each than these those
+    their his her our we you he she they who whom one two new day days use see set pay fee tax law act end
+    net sum max min top off out up via etc ltd co inc dr mr ms mrs st nd rd th km kg mm cm m2 m3 ton man
+    can do does did our own two six ten get got let led lay low key yes
+    """.split()
+)
+_JUNK_SYMBOLS = re.compile(r"[©®•@$§\\=+^|~<>{}\[\]¦¬°±*#%&_`]")
+
 _CHAR_MAP = str.maketrans({
     "ي": "ی", "ى": "ی", "ئ": "ی", "ك": "ک", "ۀ": "ه", "ة": "ه", "ؤ": "و",
     "أ": "ا", "إ": "ا", "ٱ": "ا", "ٲ": "ا",
@@ -115,8 +126,44 @@ def quality(text: str) -> dict[str, float]:
     if len(fa_toks) >= 8:
         # متن فارسی سالم معمولاً ۱۵ تا ۳۵ درصد کلمه‌ی پرتکرار دارد
         score *= 0.4 + 0.6 * min(1.0, stop / 0.12)
+    en_toks = [t.lower() for t, k in zip(toks, kinds) if k == "en"]
+    if len(en_toks) >= 6:
+        # متن لاتین واقعی: کلمات کوتاهش بیشتر of/the/and… هستند، نه «gy yo pl ee nb»
+        short = [t for t, raw in zip(en_toks, (t for t, k in zip(toks, kinds) if k == "en"))
+                 if len(t) <= 3 and not (raw.isupper() and len(raw) >= 2)]
+        junk = sum(1 for t in short if t not in EN_STOP) / len(en_toks)
+        en_stop = sum(1 for t in en_toks if t in EN_STOP) / len(en_toks)
+        en_q = (1 - min(1.0, max(0.0, junk - 0.08) * 2.5)) * (0.55 + 0.45 * min(1.0, en_stop / 0.08))
+        score *= 1 - (len(en_toks) / n) * (1 - en_q)
+    letters = sum(1 for c in norm if c.isalpha())
+    if letters >= 30:
+        sym = len(_JUNK_SYMBOLS.findall(norm)) / letters
+        score *= 1 - min(0.6, max(0.0, sym - 0.02) * 4)
     return {"score": round(score, 3), "words": n, "bad": round(bad, 3), "stop": round(stop, 3),
             "stop_rev": round(stop_rev, 3), "fa": round(fa_ratio, 3)}
+
+
+def line_plausibility(text: str) -> float:
+    """باورپذیری یک سطر کوتاه (۰ تا ۱): برای انتخاب بین خروجی OCR فارسی و انگلیسی هر سطر.
+
+    سطر فارسی که با مدل انگلیسی خوانده شود «gy yo pl lad» می‌شود و سطر انگلیسی با مدل فارسی
+    پر از ارقام درهم و حروف تک می‌شود؛ هر دو امتیاز پایین می‌گیرند.
+    """
+    norm = unicodedata.normalize("NFKC", text).translate(_CHAR_MAP).replace(ZWNJ, " ")
+    raw = [t for t in re.split(r"[^\w]+", norm) if t]
+    if not raw:
+        return 0.0
+    kinds = [_classify(t) for t in raw]
+    n = len(raw)
+    bad = sum(1 for k in kinds if k == "bad") / n
+    fa = [t for t, k in zip(raw, kinds) if k == "fa"]
+    en = [t for t, k in zip(raw, kinds) if k == "en"]
+    single_fa = sum(1 for t in fa if len(t) == 1 and t != "و")
+    junk_en = sum(1 for t in en if len(t) <= 3 and t.lower() not in EN_STOP and not (t.isupper() and len(t) >= 2))
+    long_digits = sum(1 for t, k in zip(raw, kinds) if k == "num" and len(t) >= 7 and not re.fullmatch(r"\d+", t))
+    junk = (single_fa + junk_en + long_digits) / n
+    sym = len(_JUNK_SYMBOLS.findall(norm)) / max(1, sum(c.isalpha() for c in norm))
+    return max(0.0, 1 - 1.3 * bad - 1.2 * junk - min(0.5, sym * 3))
 
 
 def _reverse_line(line: str) -> str:

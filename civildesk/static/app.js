@@ -903,18 +903,21 @@ function summaryHTML(s) {
   for (const m of s.minutes.slice(0, 1)) {
     rows.push(`<h4>📝 مصوبات آخرین صورتجلسه (${faDigits(m.date)})</h4><ol class="items">${m.items.map((i) => `<li>${esc(i)}</li>`).join("")}</ol><div class="row">${srcLink(m)}</div>`);
   }
-  const timeline = s.timeline.length ? `<h4>🗂 آخرین اسناد</h4>` + s.timeline.slice(0, 8).map((t) => `<div class="row">
-      <span class="badge gray">${faDigits(t.date)}</span>
-      <span class="grow"><b>${catLabel(t.category)}</b> ${esc(t.subject || t.title)}${t.doc_no ? ` <span class="muted">(${esc(faDigits(t.doc_no))})</span>` : ""}</span>
-      <a href="#" class="src-link" data-src="${t.id}:1:">باز کردن</a></div>`).join("") : "";
+  const story = (s.story || []).map((p) => `<section>
+      <h4>${esc(faDigits(p.title))}</h4>
+      ${p.items.map((it) => `<p>${esc(faDigits(it.text))}${it.doc_id ? ` <a href="#" class="story-src" data-src="${it.doc_id}:${it.page || 1}:${it.kind}" title="${esc(it.doc_title)}">📄</a>` : ""}</p>`).join("")}
+    </section>`).join("");
 
-  return `<div class="card summary">
-    <h3>${ico("target")} خلاصه‌ی پروژه <span class="count">خودکار از روی اسناد</span></h3>
+  return `${story ? `<div class="card story">
+    <h3>📖 روایت پروژه <span class="count">از روی ${num(s.documents.filter((d) => d.status === "ready").length)} سند</span></h3>
+    ${story}
+  </div>` : ""}
+  <div class="card summary">
+    <h3>${ico("target")} مشخصات و هشدارها <span class="count">خودکار از روی اسناد</span></h3>
     ${facts ? `<dl class="facts">${facts}</dl>` : `<p class="muted">برای خلاصه‌ی کامل (طرفین، مبلغ، مدت، تاریخ‌ها) قرارداد پروژه را بارگذاری کنید.</p>`}
     ${sugg}
     ${counts ? `<div class="chips">${counts}</div>` : ""}
     ${rows.join("")}
-    ${timeline}
     <p class="muted small">⚠️ این اطلاعات خودکار از متن اسناد خوانده شده؛ به‌خصوص در اسناد اسکن‌شده، اعداد را با سند اصلی چک کنید.</p>
   </div>`;
 }
@@ -958,7 +961,7 @@ function renderArchiveList() {
           ${d.project_auto ? `<span class="badge gray" title="پروژه از روی متن سند تشخیص داده شد">🔗 وصل خودکار</span>` : ""}
           ${d.subject ? `<span class="muted">${esc(d.title)}</span>` : ""}
         </div>
-        ${gist ? `<div class="snippet">${esc(gist)}</div>` : ""}
+        ${gist ? `<div class="snippet">${esc(faDigits(gist))}</div>` : d.info?.table ? `<div class="snippet">📊 بیشتر جدول و عدد است؛ برای دیدن جزئیات سند را باز کنید.</div>` : ""}
         ${prog !== null ? `<div class="progress"><span style="width:${prog}%"></span></div>` : ""}
         ${d.error ? `<div class="error">${esc(d.error)}</div>` : ""}
       </div>
@@ -966,6 +969,7 @@ function renderArchiveList() {
         ${viewable ? `<button class="btn" data-src="${d.id}:1:${d.kind}" title="دیدن سند">👁</button>` : ""}
         <a class="btn" href="/api/documents/${d.id}/file" target="_blank" title="باز کردن فایل اصلی">📄</a>
         <button class="btn" data-edit="${d.id}" title="ویرایش دسته، تاریخ، پروژه…">✏️</button>
+        ${d.status === "ready" || d.status === "error" ? `<button class="btn" data-areproc="${d.id}" title="خواندن و تحلیل دوباره">↻</button>` : ""}
         <button class="btn danger" data-adel="${d.id}" title="حذف">🗑</button>
       </div>
     </div>`;
@@ -974,6 +978,11 @@ function renderArchiveList() {
   const list = $("#arch-list");
   $("#arch-cats").querySelectorAll("[data-cat]").forEach((b) => b.onclick = () => { archiveState.cat = b.dataset.cat; renderArchiveList(); });
   list.querySelectorAll("[data-edit]").forEach((b) => b.onclick = () => editDocMeta(s.documents.find((d) => d.id === Number(b.dataset.edit))));
+  list.querySelectorAll("[data-areproc]").forEach((b) => b.onclick = async () => {
+    await api(`/api/documents/${b.dataset.areproc}/reprocess`, { method: "POST" });
+    toast("دوباره خوانده و تحلیل می‌شود…");
+    renderArchive($("#view"));
+  });
   list.querySelectorAll("[data-adel]").forEach((b) => b.onclick = async () => {
     if (!confirm("این سند از بایگانی و کتابخانه حذف شود؟")) return;
     await api(`/api/documents/${b.dataset.adel}`, { method: "DELETE" });

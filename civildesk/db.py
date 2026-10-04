@@ -324,7 +324,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     doc_cols = {r["name"] for r in conn.execute("PRAGMA table_info(documents)")}
     for col, typ in (("category", "TEXT"), ("doc_date", "TEXT"), ("doc_no", "TEXT"), ("subject", "TEXT"),
                      ("info", "TEXT"), ("edited", "TEXT"), ("project_auto", "INTEGER DEFAULT 0"),
-                     ("analyzed_at", "TEXT")):
+                     ("analyzed_at", "TEXT"), ("head_text", "TEXT")):
         if col not in doc_cols:
             conn.execute(f"ALTER TABLE documents ADD COLUMN {col} {typ}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_project ON documents(project_id, category)")

@@ -32,7 +32,8 @@ CATEGORIES: dict[str, str] = {
     "other": "سایر",
 }
 EDITABLE = ("category", "doc_date", "doc_no", "subject")
-ANALYZE_PAGES = 6  # فقط صفحه‌های اول برای تشخیص و استخراج
+ANALYZE_PAGES = 12  # فقط صفحه‌های اول برای تشخیص، استخراج و خلاصه
+ARCHIVE_VERSION = "2"  # با تغییر آن، همه‌ی اسناد یک بار دوباره تحلیل می‌شوند
 
 # واژه‌های هر دسته (به شکل یکسان‌شده‌ی textnorm.normalize)
 _KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -53,7 +54,7 @@ _HEAD_TITLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("amendment", ("الحاقیه", "متمم قرارداد", "اصلاحیه قرارداد")),
     ("guarantee", ("ضمانت نامه", "ضمانتنامه", "بیمه نامه")),
     ("order", ("دستور کار", "ابلاغیه")),
-    ("invoice", ("صورت وضعیت", "صورتوضعیت")),
+    ("invoice", ("صورت وضعیت", "صورتوضعیت", "وضعیت شماره", "وضعیت موقت", "وضعیت قطعی")),
     ("contract", ("قرارداد", "موافقتنامه", "پیمان")),
     ("financial", ("پیش فاکتور", "فاکتور", "صورتحساب")),
     ("report", ("گزارش",)),
@@ -171,6 +172,79 @@ def _line_after(text: str, pattern: str, maxlen: int = 160) -> tuple[int, str] |
     return (m.start(), val[:maxlen]) if len(val) >= 3 else None
 
 
+# ───────────────────────── خلاصه‌ی استخراجی ─────────────────────────
+
+_CUES = ("خواهشمند", "مقرر", "ابلاغ", "لازم", "موظف", "تمدید", "تاخیر", "پرداخت", "درخواست", "اعلام", "تایید",
+         "موافقت", "الزام", "جریمه", "خسارت", "تحویل", "شروع", "پایان", "اتمام", "مبلغ", "مدت", "تعهد", "اصلاح",
+         "shall", "amend", "extension", "payment", "completion")
+_HEADER_START = re.compile(r"^(شماره|تاریخ|پیوست|موضوع|رونوشت|جناب|سرکار|امضا|نام\s|ردیف|صفحه|مدیرعامل|ریاست|"
+                           r"نشانی|آدرس|تلفن|کد\s+پستی|حاضرین|غایبین|مدعوین|دستور\s+جلسه)")
+_SALUTE = re.compile(r"^(با\s+سلام(\s+و\s+(احترام|ادب)[^\s،,]*)?|سلام\s+علیکم|احتراما[ًٌء]?)[\s،,:.]*")
+_LIST_START = re.compile(r"^\s*(\d{1,2}\s*[-.)]|[-•*]|(ماده|بند|تبصره)\s*\d{1,3}\s*[-–:.)]?)\s*")
+
+
+def _numeric_share(text: str) -> float:
+    toks = text.split()
+    return sum(1 for t in toks if not re.search(r"[^\W\d_]", t)) / max(1, len(toks))
+
+
+def _units(text: str) -> list[str]:
+    """تبدیل متن (با سطرهای شکسته‌ی PDF یا OCR) به جمله‌ها و بندها."""
+    units = []
+    for para in re.split(r"\n\s*\n", text):
+        buf: list[str] = []
+        lines = [ln.strip() for ln in para.split("\n") if ln.strip()]
+        for line in lines:
+            if buf and (_LIST_START.match(line) or _HEADER_START.match(line)):
+                units.append(" ".join(buf))
+                buf = []
+            # سطر کوتاه تنها = تیتر یا سرنامه؛ سطر کوتاه وسط بند = ادامه‌ی جمله‌ای که شکسته شده
+            if not buf and len(line.split()) < 6:
+                units.append(line)
+                continue
+            buf.append(line)
+            if line.endswith((".", "؟", "!", ":", "؛")):
+                units.append(" ".join(buf))
+                buf = []
+        if buf:
+            units.append(" ".join(buf))
+    out = []
+    for u in units:
+        out += [x.strip() for x in re.split(r"(?<=[.؟!؛])\s+(?=\D)", u) if x.strip()]
+    return out
+
+
+def summarize(text: str, n: int = 3) -> list[str]:
+    """خلاصه‌ی استخراجی: مهم‌ترین جمله‌ها به ترتیب متن (بدون سرنامه، جدول و متن خراب OCR)."""
+    cands = []
+    for i, u in enumerate(_units(text)):
+        u = _SALUTE.sub("", _LIST_START.sub("", u)).strip(" -–:،,")
+        words = u.split()
+        if not 6 <= len(words) <= 80 or _HEADER_START.match(u) or _numeric_share(u) > 0.3:
+            continue
+        if textnorm.line_plausibility(u) < 0.6 or textnorm.quality(u)["score"] < 0.7:
+            continue
+        cands.append((i, u))
+    if not cands:
+        return []
+    terms = [[textnorm.stem(t) for t in textnorm.tokens(u)
+              if len(t) > 2 and t not in textnorm.STOPWORDS and t not in textnorm.EN_STOP and not t.isdigit()]
+             for _, u in cands]
+    tf: dict[str, int] = {}
+    for ts in terms:
+        for t in set(ts):
+            tf[t] = tf.get(t, 0) + 1
+    scored = []
+    for k, ((i, u), ts) in enumerate(zip(cands, terms)):
+        uniq = set(ts)
+        base = sum(tf[t] for t in uniq) / (len(uniq) ** 0.6) if uniq else 0
+        norm = textnorm.normalize(u)
+        cue = min(3, sum(1 for c in _CUES if c in norm))
+        scored.append((base * (1 + 0.35 * cue) * (1.25 - 0.4 * k / len(cands)), i, u))
+    best = sorted(scored, reverse=True)[:n]
+    return [u if len(u) <= 280 else u[:280].rsplit(" ", 1)[0] + "…" for _, _, u in sorted(best, key=lambda x: x[1])]
+
+
 # ───────────────────────── دسته‌بندی ─────────────────────────
 
 
@@ -227,12 +301,13 @@ def extract(text: str, category: str) -> dict[str, Any]:
         r"([0-9][\w/\-.]{0,24}(?:\s*/\s*[\w\-.]{1,12}){0,3})", head)
     if m:
         info["doc_no"] = {"pos": m.start(), "value": re.sub(r"\s+", "", m.group(1)).strip("/.-")}
-    dm = _date_after(head, r"تاریخ" + SP + r"(?:نامه|قرارداد|جلسه)?", 40)
+    dm = _date_after(head, r"(?<!تا )(?<!از )تاریخ" + SP + r"(?:نامه|قرارداد|جلسه)?", 40)
+    guessed = not dm
     if not dm:
         ds = _dates(head)
         dm = ds[0] if ds else None
     if dm:
-        info["doc_date"] = {"pos": dm[0], "value": dm[1]}
+        info["doc_date"] = {"pos": dm[0], "value": dm[1], "guessed": guessed}
 
     # موضوع
     sub = _line_after(text[:2500], r"موضوع" + SP + r"(?:قرارداد|پیمان|جلسه|نامه)?\s*(?:عبارت\s+است\s+از)?")
@@ -249,19 +324,14 @@ def extract(text: str, category: str) -> dict[str, Any]:
         if fm and key not in info:
             info[key] = {"pos": fm.start(1), "value": fm.group(1).strip()}
 
-    # خلاصه: جمله‌های اول بعد از سلام، یا اولین بند معنادار
-    gist = ""
-    sm = re.search(r"(احتراما[ًٌ]?|با\s+سلام[^\n]{0,30}?(?:احترام|\n)|سلام\s+علیکم)", text[:2000])
-    body = text[sm.end():] if sm else text
-    body = re.sub(r"^[\s،,:.\-]+", "", body)
-    for para in re.split(r"\n\s*\n|(?<=[.؟!])\s", body):
-        para = " ".join(para.split())
-        if len(para.split()) >= 6 and not re.match(r"^(شماره|تاریخ|پیوست|موضوع)\s*:", para):
-            gist += (" " if gist else "") + para
-            if len(gist) > 180:
-                break
-    if gist:
-        info["gist"] = {"pos": 0, "value": gist[:300] + ("…" if len(gist) > 300 else "")}
+    # خلاصه: مهم‌ترین جمله‌های سند (برای نامه‌ها، از متن بعد از سلام)
+    sm = re.search(r"(احتراما[ًٌء]?|با\s+سلام[^\n]{0,30}?(?:احترام|\n)|سلام\s+علیکم)", text[:2000])
+    summary = summarize(text[sm.end():] if sm and category in ("letter", "order") else text,
+                        3 if category in ("contract", "amendment", "report", "other") else 2)
+    if summary:
+        info["gist"] = {"pos": 0, "value": " ".join(summary)}
+    elif _numeric_share(text) > 0.35:
+        info["table"] = {"pos": 0, "value": True}  # بیشتر جدول و عدد است (مثلاً صورت‌وضعیت)
 
     # مبالغ
     amounts = _amounts(text)
@@ -309,6 +379,8 @@ def extract(text: str, category: str) -> dict[str, Any]:
         vu = _date_after(flat, r"(?:اعتبار|سررسید|انقضا|معتبر|تا\s+تاریخ)", 80)
         if vu:
             info["valid_until"] = {"pos": vu[0], "value": vu[1]}
+            if (info.get("doc_date") or {}).get("guessed") and info["doc_date"]["value"] == vu[1]:
+                del info["doc_date"]  # تاریخ سررسید، تاریخ صدور نیست
     if category == "invoice":
         im = re.search(r"صورت" + SP + r"وضعیت\s+(?:موقت\s+|قطعی\s+)?(?:شماره\s*|ش\s*)?(\d{1,3})(?!\d)", flat)
         if im:
@@ -350,10 +422,23 @@ def extract(text: str, category: str) -> dict[str, Any]:
 def _doc_text(conn, doc_id: int, page_texts: list[tuple[int, str]] | None) -> tuple[str, list[int], list[int]]:
     """متن صفحه‌های اول؛ ترجیحاً متن اصلی صفحه (با سطرهای دست‌نخورده)، وگرنه از روی بندهای نمایه‌شده."""
     if page_texts is None:
-        page_texts = [(r["page"], r["text"]) for r in conn.execute(
-            "SELECT page, text FROM doc_chunks WHERE doc_id = ? AND page <= ? ORDER BY page, seq",
-            (doc_id, ANALYZE_PAGES),
-        )]
+        row = conn.execute("SELECT head_text FROM documents WHERE id = ?", (doc_id,)).fetchone()
+        if row and row["head_text"]:
+            page_texts = json.loads(row["head_text"])
+        else:  # اسناد قدیمی: از روی بندهای نمایه‌شده (سطرها به هم چسبیده‌اند)
+            page_texts = [(r["page"], r["text"]) for r in conn.execute(
+                "SELECT page, text FROM doc_chunks WHERE doc_id = ? AND page <= ? ORDER BY page, seq",
+                (doc_id, ANALYZE_PAGES),
+            )]
+    else:
+        keep, size = [], 0
+        for page, raw in page_texts[:ANALYZE_PAGES]:
+            keep.append((page, raw[:20000]))
+            size += len(raw)
+            if size > 80000:
+                break
+        page_texts = keep
+        conn.execute("UPDATE documents SET head_text = ? WHERE id = ?", (json.dumps(keep, ensure_ascii=False), doc_id))
     parts, starts, pages, pos = [], [], [], 0
     for page, raw in page_texts[: ANALYZE_PAGES * 20]:
         t = _prep(raw) + "\n\n"
@@ -409,6 +494,20 @@ def match_project(conn, text: str) -> int | None:
         if any(len(k) >= 4 and f" {k} " in norm for k in keys):
             hits.append(p["id"])
     return hits[0] if len(hits) == 1 else None
+
+
+def upgrade() -> None:
+    """پس از بهبود خواندن و تحلیل، اسناد موجود یک بار (برای هر نسخه) دوباره خوانده یا تحلیل می‌شوند."""
+    with db.connect() as conn:
+        if db.kv_get(conn, "archive_version") == ARCHIVE_VERSION:
+            return
+        # اسناد تا ۴۰ صفحه یک بار کامل دوباره خوانده می‌شوند (OCR بهتر + متن صفحه برای خلاصه)؛
+        # اسناد بزرگ‌تر فقط دوباره تحلیل می‌شوند تا پردازنده‌ی سرور مدت طولانی مشغول نماند
+        n = conn.execute("UPDATE documents SET status='queued' WHERE status IN ('ready','error') AND pages <= 40").rowcount
+        if n:
+            log.info("%d سند برای خواندن دوباره در صف قرار گرفت", n)
+        conn.execute("UPDATE documents SET analyzed_at = NULL")
+        db.kv_set(conn, "archive_version", ARCHIVE_VERSION)
 
 
 def analyze_pending() -> int:
@@ -520,6 +619,151 @@ def _src(d: dict, item: dict | None = None) -> dict[str, Any]:
     return {"doc_id": d["id"], "doc_title": d["title"], "page": (item or {}).get("page", 1), "kind": d["kind"]}
 
 
+# ───────────────────────── روایت پروژه ─────────────────────────
+
+
+def _money(v: int | None) -> str:
+    return f"{v:,} ریال" if v else ""
+
+
+def _day_month(jdate: str) -> str:
+    y, m, d = (int(x) for x in jdate.split("/"))
+    return f"{d} {jalali.MONTHS_FA[m - 1]}"
+
+
+def _quote(s: str | None, limit: int = 120) -> str:
+    s = " ".join((s or "").split()).strip(" .،:")
+    return f"«{s if len(s) <= limit else s[:limit].rsplit(' ', 1)[0] + '…'}»" if s else ""
+
+
+def _event_sentence(d: dict) -> str:
+    """یک جمله‌ی روایی برای هر سند، بسته به نوعش."""
+    info, cat = d["info"], d.get("category") or "other"
+    subj = _quote(d.get("subject"))
+    title = _quote(d["title"])
+    amount = (info.get("amount") or {}).get("value")
+    amt = f" به مبلغ {_money(amount)}" if amount else ""
+    no = f" شماره‌ی {d['doc_no']}" if d.get("doc_no") else ""
+    gist = (info.get("gist") or {}).get("value")
+    if cat == "letter":
+        to = (info.get("to") or {}).get("value")
+        s = f"نامه‌ی{no or ''}{' خطاب به ' + to if to else ''}{' با موضوع ' + subj if subj else ''} نوشته شد."
+        if not no and not to and not subj:
+            s = f"نامه‌ی {title} بایگانی شد."
+    elif cat == "order":
+        s = f"دستور کار / ابلاغیه‌ی{no} {subj or title} صادر شد."
+    elif cat == "minutes":
+        items = (info.get("items") or {}).get("value") or []
+        s = f"جلسه‌ای{' با موضوع ' + subj if subj else ''} برگزار شد"
+        if items:
+            s += " و مقرر شد: " + "؛ ".join(i.rstrip(".") for i in items[:3]) + "."
+            gist = None
+        else:
+            s += "."
+    elif cat == "amendment":
+        du = (info.get("duration") or {}).get("value")
+        s = f"الحاقیه / تمدید {subj or title}{amt}{' با مدت ' + du if du else ''} تنظیم شد."
+    elif cat == "invoice":
+        n = (info.get("invoice_no") or {}).get("value")
+        s = f"صورت‌وضعیت{' شماره‌ی ' + n if n else ' ' + title}{amt} تهیه شد."
+        gist = None
+    elif cat == "guarantee":
+        vu = (info.get("valid_until") or {}).get("value")
+        s = f"ضمانت‌نامه‌ی {subj or title}{amt}{' با اعتبار تا ' + vu if vu else ''} صادر شد."
+        gist = None
+    elif cat == "contract":
+        s = f"قرارداد{no} {subj or title}{amt} منعقد شد."
+    elif cat == "report":
+        s = f"گزارش {subj or title} تهیه شد."
+    elif cat == "financial":
+        s = f"سند مالی {title}{amt} ثبت شد."
+    else:
+        s = f"{CATEGORIES.get(cat, 'سند')} {subj or title} بایگانی شد."
+    if gist:
+        first = gist if len(gist) <= 260 else gist[:260].rsplit(" ", 1)[0] + "…"
+        s += f" در آن آمده است: «{first}»"
+    return s
+
+
+def build_story(project: dict, ready: list[dict], contract: dict | None, facts: dict[str, Any],
+                deadlines: list[dict], guarantees: list[dict], today: str) -> list[dict[str, Any]]:
+    """روایت زمانی پروژه از روی اسناد: مقدمه از قرارداد، رویدادها ماه به ماه، و وضعیت امروز.
+
+    خروجی: بندهایی با عنوان و جمله‌هایی که هرکدام به سند منبعش پیوند دارد.
+    """
+    paras: list[dict[str, Any]] = []
+    name = project["name"]
+    if contract:
+        intro = f"پروژه‌ی «{name}»"
+        if facts.get("subject"):
+            intro += f" با موضوع {_quote(facts['subject'], 160)}"
+        intro += " بر اساس قرارداد"
+        if facts.get("contract_no"):
+            intro += f" شماره‌ی {facts['contract_no']}"
+        if facts.get("contract_date"):
+            intro += f" مورخ {facts['contract_date']}"
+        parties = [f"{facts[k]} ({lbl})" for k, lbl in (("employer", "کارفرما"), ("contractor", "پیمانکار"),
+                                                        ("consultant", "مشاور")) if facts.get(k)]
+        if parties:
+            intro += " میان " + " و ".join(parties)
+        if facts.get("contract_amount"):
+            intro += f" به مبلغ {_money(facts['contract_amount'])}"
+        if facts.get("duration"):
+            intro += f" و مدت {facts['duration']}"
+        intro += " منعقد شده است."
+        if facts.get("start_date") or facts.get("end_date"):
+            intro += " " + "، ".join(x for x in (
+                f"تاریخ شروع {facts['start_date']}" if facts.get("start_date") else "",
+                f"تاریخ پایان {facts['end_date']}" if facts.get("end_date") else "") if x) + " است."
+        paras.append({"title": "آغاز", "items": [{"text": intro, **_src(contract)}]})
+
+    dated = sorted((d for d in ready if d.get("doc_date") and d is not contract), key=lambda d: (d["doc_date"], d["id"]))
+    month_key, seen = None, set()
+    for d in dated:
+        key = (d["doc_date"], d.get("category"), d.get("doc_no") or d.get("subject") or d["id"])
+        if key in seen:  # نسخه‌ی دیگری از همان سند (مثلاً اسکن و عکس)
+            continue
+        seen.add(key)
+        y, m, _ = d["doc_date"].split("/")
+        if (y, m) != month_key:
+            month_key = (y, m)
+            paras.append({"title": f"{jalali.MONTHS_FA[int(m) - 1]} {int(y)}", "items": []})
+        paras[-1]["items"].append({"text": f"{_day_month(d['doc_date'])}: {_event_sentence(d)}", **_src(d)})
+
+    undated = [d for d in ready if not d.get("doc_date") and d is not contract]
+    if undated:
+        paras.append({"title": "اسناد بدون تاریخ مشخص", "items": [
+            {"text": _event_sentence(d), **_src(d)} for d in sorted(undated, key=lambda d: d["id"])]})
+
+    now = []
+    end = facts.get("end_date")
+    if end:
+        try:
+            left = jalali.days_between(today, end)
+            now.append(f"تا پایان مدت قرارداد ({end}) {left} روز مانده است." if left >= 0
+                       else f"مدت قرارداد {-left} روز پیش ({end}) به پایان رسیده است؛ اگر تمدید شده، الحاقیه‌اش را بارگذاری کنید.")
+        except ValueError:
+            pass
+    late = [x for x in deadlines if x["late"]]
+    coming = [x for x in deadlines if not x["late"]]
+    if coming:
+        now.append(f"{len(coming)} مهلت پیش رو هست؛ نزدیک‌ترین: {coming[0]['due']} ({_quote(coming[0]['text'], 90)}).")
+    if late:
+        now.append(f"مهلت {len(late)} مورد از نامه‌ها و صورتجلسه‌ها گذشته است؛ اگر انجام شده، نگرانی نیست.")
+    exp = [g for g in guarantees if g["state"] == "expired"]
+    soon = [g for g in guarantees if g["state"] == "soon"]
+    if exp:
+        now.append(f"{len(exp)} ضمانت‌نامه منقضی شده است.")
+    if soon:
+        now.append(f"{len(soon)} ضمانت‌نامه تا یک ماه دیگر سررسید می‌شود ({soon[0]['valid_until']}).")
+    if ready:
+        last = max(ready, key=lambda d: (d["date"], d["id"]))
+        now.append(f"آخرین سند بایگانی‌شده {_quote(last.get('subject') or last['title'], 90)} مورخ {last['date']} است.")
+    if now:
+        paras.append({"title": f"وضعیت امروز ({today})", "items": [{"text": t} for t in now]})
+    return paras
+
+
 def project_summary(project_id: int | None) -> dict[str, Any]:
     """خلاصه‌ی زنده‌ی پروژه از روی همه‌ی اسناد بایگانی‌شده‌اش."""
     docs = list_docs(project_id)
@@ -622,6 +866,9 @@ def project_summary(project_id: int | None) -> dict[str, Any]:
             if field and not project.get(field):
                 suggestions.append({"field": field, "label": labels[field], "value": f["value"], "money": f.get("money", False)})
 
+    story = build_story(project, ready, contract, {f["key"]: f["value"] for f in facts},
+                        deadlines, guarantees, today) if project else []
+
     timeline = [{
         "id": d["id"], "date": d["date"], "category": d.get("category") or "other", "title": d["title"],
         "doc_no": d.get("doc_no"), "subject": d.get("subject"), "gist": (d["info"].get("gist") or {}).get("value"),
@@ -631,7 +878,7 @@ def project_summary(project_id: int | None) -> dict[str, Any]:
         "project": project, "documents": docs, "counts": counts, "categories": CATEGORIES,
         "facts": facts, "amendments": amendments, "last_invoice": last_invoice, "invoices": len(invoices),
         "guarantees": guarantees, "deadlines": deadlines[:12], "minutes": minutes, "suggestions": suggestions,
-        "timeline": timeline, "today": today,
+        "timeline": timeline, "story": story, "today": today,
         "pending": sum(1 for d in docs if d["status"] in ("queued", "processing")),
         "last_update": max((d.get("analyzed_at") or "" for d in docs), default="") or None,
     }
