@@ -124,7 +124,8 @@ def test_live_project_summary():
     sugg = {x["field"]: x["value"] for x in s["suggestions"]}
     assert sugg["contract_amount"] == 85_000_000_000 and sugg["start_date"] == "1402/12/01"
     assert "code" not in sugg  # کد پروژه پر بوده
-    assert s["timeline"][0]["date"] == "1403/06/02"  # جدیدترین اول
+    dated = [t for t in s["timeline"] if t["date"] != s["today"]]  # ضمانت‌نامه تاریخ صدور ندارد
+    assert dated[0]["date"] == "1403/06/02"  # جدیدترین اول
 
 
 def test_manual_edit_survives_reprocess():
@@ -153,3 +154,67 @@ def test_archive_api():
     assert r.status_code == 200 and r.json()["doc_date"] == "1402/11/21"
     assert client.get("/api/archive/0").json()["documents"][0]["id"] == doc_id
     assert client.patch(f"/api/documents/{doc_id}", json={"category": "xxx"}).status_code == 400
+
+
+def test_latin_garbage_is_low_quality():
+    from civildesk import textnorm
+    broken = "e ee © •eeee © •eee ee ©e e @ @ee WFee eJ ee © +ee • e • ee nb +) oIB Un oI I' I=++) q' :$ ! § b :::L q a' 'a ^g"
+    mixed = ("AMENDMENT (low OF CONTRACT , No. 073-1404-9 & gy yo pl FOF —oV 9 lad BETWEEN os PETROLEUM Call dag 9 "
+             "urhign OS pi ENGINEERING AND oe DEVELOPMENT (onside Jlait) COMPANY AND MEHRAN OIL AND GAS Cah 990 g Cad dewgd")
+    english = ("This amendment is made between the Company and the Contractor and shall be effective from the date "
+               "of signature of both parties. The Contractor shall complete the works within the time for completion.")
+    assert textnorm.quality(broken)["score"] < 0.2
+    assert textnorm.quality(mixed)["score"] < 0.5
+    assert textnorm.quality(english)["score"] > 0.95
+    assert textnorm.quality(LETTER)["score"] > 0.9
+
+
+def test_merge_bilingual_ocr_lines():
+    def ln(text, x0, y0, conf=90):
+        return {"text": text, "x0": x0, "y0": y0, "x1": x0 + 400, "y1": y0 + 30,
+                "score": conf / 100 * __import__("civildesk.textnorm").textnorm.line_plausibility(text)}
+    fas = [ln("پیمانکار موظف است کارها را در مدت مقرر به پایان برساند", 600, 100),
+           ln("۰ 00۵۱۲۳۵۲ 10 1 ۱۱۵۰ ۸۵۷۴۶۱۱۲2۱۱۲۴", 100, 100, 70)]
+    eng = [ln("cul abo yISiley Wlgo 5lS 9 rai", 600, 100, 60),
+           ln("The Contractor shall complete the works within the time", 100, 100)]
+    merged = documents.merge_ocr_lines(fas, eng)
+    assert merged.split("\n") == ["پیمانکار موظف است کارها را در مدت مقرر به پایان برساند",
+                                  "The Contractor shall complete the works within the time"]
+
+
+def test_summary_and_invoice_title():
+    gist = archive.extract(archive._prep(LETTER), "letter")["gist"]["value"]
+    assert gist.startswith("با توجه به بازدید") and "خواهشمند است" in gist and "شماره" not in gist
+    assert archive.classify("وضعیت شماره ۱", "", "pdf", 10) == "invoice"
+    table = "ردیف شرح واحد مقدار\n1 خاکبرداری m3 1250 450000 562500000\n2 بتن m3 320 9800000 3136000000\n" * 5
+    info = archive.extract(archive._prep(table), "invoice")
+    assert "gist" not in info and info["table"]["value"]
+    g = archive.extract(archive._prep(GUARANTEE), "guarantee")
+    assert "doc_date" not in g and g["valid_until"]["value"] == "1403/01/15"
+
+
+def test_project_story():
+    p = _project()
+    for text, name in ((CONTRACT, "c.txt"), (LETTER, "l.txt"), (MINUTES, "m.txt")):
+        _add(text, name, project_id=p["id"])
+    story = archive.project_summary(p["id"])["story"]
+    titles = [x["title"] for x in story]
+    assert titles[0] == "آغاز" and "مرداد 1403" in titles and "شهریور 1403" in titles
+    intro = story[0]["items"][0]["text"]
+    assert "85,000,000,000 ریال" in intro and "شرکت عمران شهر (کارفرما)" in intro and "18 ماه" in intro
+    letter = next(x for x in story if x["title"] == "مرداد 1403")["items"][0]
+    assert letter["text"].startswith("12 مرداد: نامه‌ی شماره‌ی 1403/ص/245") and letter["doc_id"]
+    assert story[-1]["title"].startswith("وضعیت امروز")
+
+
+def test_upgrade_requeues_garbage_and_reanalyzes():
+    p = _project()
+    d = _add(LETTER, "l.txt", project_id=p["id"])
+    with db.connect() as conn:
+        conn.execute("UPDATE documents SET kind='pdf', pages=2 WHERE id=?", (d["id"],))
+        conn.execute("UPDATE doc_chunks SET text=? WHERE doc_id=?", ("e ee © •eeee © •eee ee ©e e @ @ee WFee eJ ee nb oIB Un", d["id"]))
+        conn.execute("DELETE FROM kv WHERE key='archive_version'")
+    archive.upgrade()
+    assert documents.get_document(d["id"])["status"] == "queued"
+    assert documents.get_document(d["id"])["analyzed_at"] is None
+    archive.upgrade()  # فقط یک بار

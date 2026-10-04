@@ -393,6 +393,12 @@ mark { background: #fbe3a6; color: inherit; border-radius: 4px; padding: 0 2px; 
 .items { margin: 4px 0; padding-inline-start: 22px; line-height: 1.9; font-size: 14px; }
 .arch-doc .snippet { font-size: 13px; color: var(--muted); margin-top: 4px; line-height: 1.8; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .badge.cat { background: var(--primary-soft); color: var(--primary); }
+.story { border-top: 3px solid var(--navy); }
+.story section + section { border-top: 1px dashed var(--line); margin-top: 6px; }
+.story h4 { margin: 12px 0 4px; font-size: 14.5px; color: var(--gold-600); }
+.story p { margin: 4px 0; line-height: 2.1; font-size: 15px; text-align: justify; }
+.story-src { text-decoration: none; font-size: 12px; opacity: .7; }
+.story-src:hover { opacity: 1; }
 .empty-state p { line-height: 2; color: var(--muted); }
 @media (max-width: 640px) {
   .arch-doc { flex-wrap: wrap; }

@@ -65,22 +65,79 @@ def _tesseract(path: str, langs: str) -> str:
     return res.stdout
 
 
-def ocr_image(path: str) -> str:
-    """OCR تطبیقی: اول فارسی (دقیق‌ترین برای متن فارسی)، اگر نتیجه ضعیف بود انگلیسی و ترکیبی.
+def _tesseract_lines(path: str, langs: str) -> list[dict[str, Any]]:
+    """سطرهای OCR با کادر و میانگین اطمینان کلمات (خروجی TSV تسرکت)."""
+    res = subprocess.run(
+        ["tesseract", path, "stdout", "-l", langs, "--psm", "3", "tsv"],
+        capture_output=True, text=True, timeout=300,
+    )
+    if res.returncode != 0:
+        raise RuntimeError(res.stderr.strip()[:300] or "خطای OCR")
+    lines: dict[tuple, dict[str, Any]] = {}
+    for row in res.stdout.splitlines()[1:]:
+        c = row.split("\t")
+        if len(c) < 12 or c[0] != "5" or not c[11].strip() or float(c[10]) < 0:
+            continue
+        key = (int(c[2]), int(c[3]), int(c[4]))
+        x, y, w, h = (int(v) for v in c[6:10])
+        ln = lines.setdefault(key, {"words": [], "confs": [], "x0": x, "y0": y, "x1": x + w, "y1": y + h})
+        ln["words"].append(c[11].strip())
+        ln["confs"].append(float(c[10]))
+        ln["x0"], ln["y0"] = min(ln["x0"], x), min(ln["y0"], y)
+        ln["x1"], ln["y1"] = max(ln["x1"], x + w), max(ln["y1"], y + h)
+    out = []
+    for ln in lines.values():
+        text = " ".join(ln["words"])
+        ln["text"] = text
+        ln["score"] = (sum(ln["confs"]) / len(ln["confs"]) / 100) * textnorm.line_plausibility(text)
+        out.append(ln)
+    return out
 
-    مدل ترکیبی fas+eng بعضی کلمات فارسی را لاتین می‌خواند، برای همین پیش‌فرض نیست.
+
+def _overlap(a: dict, b: dict) -> bool:
+    dy = min(a["y1"], b["y1"]) - max(a["y0"], b["y0"])
+    dx = min(a["x1"], b["x1"]) - max(a["x0"], b["x0"])
+    return dy > 0.5 * min(a["y1"] - a["y0"], b["y1"] - b["y0"]) and dx > 0.3 * min(a["x1"] - a["x0"], b["x1"] - b["x0"])
+
+
+def merge_ocr_lines(primary: list[dict], other: list[dict]) -> str:
+    """ادغام سطر به سطر دو خروجی OCR (مثلاً فارسی و انگلیسی): برای هر ناحیه، سطر باورپذیرتر.
+
+    برای اسناد دوزبانه (ستون فارسی کنار ستون انگلیسی) که هیچ‌کدام از مدل‌ها به‌تنهایی کل صفحه را درست نمی‌خواند.
+    """
+    out, used = [], set()
+    for ln in primary:
+        rivals = [i for i, o in enumerate(other) if _overlap(ln, o)]
+        best = max((other[i]["score"] for i in rivals), default=-1)
+        if rivals and best > ln["score"] + 0.05:
+            out += [other[i]["text"] for i in rivals if i not in used]
+            used.update(rivals)
+        else:
+            out.append(ln["text"])
+    # سطرهایی که فقط مدل دوم دیده (و باورپذیرند)، در جای عمودی خودشان
+    extra = [(o["y0"], o["text"]) for i, o in enumerate(other)
+             if i not in used and o["score"] >= 0.5 and not any(_overlap(o, p) for p in primary)]
+    return "\n".join(out + [t for _, t in sorted(extra)])
+
+
+def ocr_image(path: str) -> str:
+    """OCR تطبیقی: اول فارسی؛ اگر بخشی از صفحه درست خوانده نشد، انگلیسی هم خوانده و سطر به سطر ادغام می‌شود.
+
+    مدل ترکیبی fas+eng کلمات فارسی را گاهی لاتین می‌خواند، برای همین استفاده نمی‌شود.
     """
     first = os.getenv("CIVILDESK_OCR_LANGS", "fas")
-    best, best_q = "", -1.0
-    for langs in dict.fromkeys([first, "eng", "fas+eng"]):
-        text = _tesseract(path, langs)
-        qd = textnorm.quality(text)
-        q = qd["score"] * min(1.0, 0.5 + qd["words"] / 40)  # متن معنادار بیشتر = بهتر
-        if q > best_q:
-            best, best_q = text, q
-        if qd["score"] >= 0.85 and qd["words"] >= 15:
-            break
-    return best
+    primary = _tesseract_lines(path, first)
+    text = "\n".join(ln["text"] for ln in primary)
+    qd = textnorm.quality(text)
+    weak = sum(1 for ln in primary if ln["score"] < 0.45)
+    if qd["score"] >= 0.85 and qd["words"] >= 15 and weak <= max(1, len(primary) // 10):
+        return text
+    if first == "eng":
+        return text
+    merged = merge_ocr_lines(primary, _tesseract_lines(path, "eng"))
+    mq = textnorm.quality(merged)
+    rate = lambda q: q["score"] * min(1.0, 0.5 + q["words"] / 40)  # noqa: E731 — متن معنادار بیشتر = بهتر
+    return merged if rate(mq) >= rate(qd) else text
 
 
 def _ocr_pdf_page(page) -> str:
@@ -481,7 +538,8 @@ class Worker:
 
     def _run(self) -> None:
         try:
-            archive.analyze_pending()  # اسنادی که پیش از بخش بایگانی بارگذاری شده‌اند
+            archive.upgrade()  # بعد از به‌روزرسانی برنامه: تحلیل دوباره (و خواندن دوباره‌ی اسناد خراب)
+            archive.analyze_pending()  # اسنادی که هنوز تحلیل نشده‌اند
         except Exception:
             log.exception("تحلیل اسناد قدیمی ناموفق بود")
         embedder.get_model()  # بارگذاری مدل در پس‌زمینه
