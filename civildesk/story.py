@@ -128,6 +128,11 @@ def event_core(d: dict, contract_amount: int | None = None) -> str:
             parts.append(f"پیشرفت فیزیکی {_v(info, 'progress'):g}٪")
         if parts:
             s += "؛ " + join_fa(parts) + " است"
+        cp, ap = _v(info, "claimed_period"), _v(info, "approved_period")
+        if cp and ap and cp != ap:
+            s += (f". پیمانکار برای این دوره {fa_money(cp)} درخواست کرده و مشاور {fa_money(ap)} را تأیید کرده است"
+                  f" (حدود {pct(cp - ap, cp)} کمتر)" if ap < cp else
+                  f". پیمانکار برای این دوره {fa_money(cp)} درخواست کرده و مشاور {fa_money(ap)} را تأیید کرده است")
         elif amount:
             s += f"؛ مبلغ آن {fa_money(amount)} خوانده شد"
         return s + "."

@@ -24,7 +24,7 @@ from typing import Any, BinaryIO, Iterator
 
 import numpy as np
 
-from . import archive, db, embedder, textnorm
+from . import archive, db, embedder, tables, textnorm
 from .config import settings
 
 log = logging.getLogger(__name__)
@@ -152,6 +152,23 @@ def _ocr_pdf_page(page) -> str:
         return ocr_image(tmp.name)
     finally:
         os.unlink(tmp.name)
+
+
+def read_sheet_page(path: Path, kind: str, page_no: int) -> dict[str, Any] | None:
+    """جدول مالی یک صفحه (صورت‌وضعیت) سلول به سلول؛ None اگر جدولی پیدا نشد."""
+    from PIL import Image
+
+    if kind == "image":
+        img = Image.open(path)
+    else:
+        import pymupdf
+
+        with pymupdf.open(path) as pdf:
+            page = pdf[page_no - 1]
+            longest = max(page.rect.width, page.rect.height) / 72
+            pix = page.get_pixmap(dpi=min(300, int(4200 / max(longest, 1))), colorspace=pymupdf.csGRAY)
+            img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
+    return tables.read_sheet(img)
 
 
 # ───────────────────────── استخراج متن ─────────────────────────
@@ -428,10 +445,20 @@ def process_document(doc_id: int) -> None:
     total = 0
     head_pages: list[tuple[int, str]] = []  # متن کامل صفحه‌های اول برای بایگانی (سطرها حفظ می‌شوند)
     tail_pages: list[tuple[int, str]] = []
+    sheets: list[dict[str, Any]] = []  # جدول‌های مالی خوانده‌شده (صورت‌وضعیت)
+    invoice_like = archive.classify(d["title"], "", d["kind"], 1) == "invoice"
+    read_tables = ocr_available() and d["kind"] in ("pdf", "image")
     for page_no, total, extract in iter_pages(Path(d["path"]), d["kind"]):
         if worker.stopping:
             return
         text, method = extract()
+        if read_tables and page_no <= archive.ANALYZE_PAGES and (invoice_like or tables.looks_financial(text)):
+            try:
+                sheet = read_sheet_page(Path(d["path"]), d["kind"], page_no)
+                if sheet:
+                    sheets.append({"page": page_no, "title": tables.sheet_title(text), **sheet})
+            except Exception:
+                log.exception("خواندن جدول صفحه‌ی %s سند %s ناموفق بود", page_no, doc_id)
         if page_no <= archive.ANALYZE_PAGES:
             head_pages.append((page_no, textnorm.clean_display(text)))
         else:  # دو صفحه‌ی آخر هم (برگ خلاصه‌ی صورت‌وضعیت، امضاها) نگه داشته می‌شود
@@ -463,7 +490,7 @@ def process_document(doc_id: int) -> None:
         conn.execute("UPDATE documents SET status='ready', updated_at=? WHERE id=?", (db.now_str(), doc_id))
     _vector_cache.invalidate()
     try:  # دسته‌بندی و استخراج اطلاعات برای بایگانی پروژه
-        archive.analyze(doc_id, head_pages + (tail_pages if total > archive.ANALYZE_PAGES else []))
+        archive.analyze(doc_id, head_pages + (tail_pages if total > archive.ANALYZE_PAGES else []), sheets)
     except Exception:
         log.exception("تحلیل سند %s برای بایگانی ناموفق بود", doc_id)
 

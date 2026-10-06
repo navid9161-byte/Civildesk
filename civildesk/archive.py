@@ -33,7 +33,7 @@ CATEGORIES: dict[str, str] = {
 }
 EDITABLE = ("category", "doc_date", "doc_no", "subject")
 ANALYZE_PAGES = 12  # فقط صفحه‌های اول برای تشخیص، استخراج و خلاصه
-ARCHIVE_VERSION = "3"  # با تغییر آن، همه‌ی اسناد یک بار دوباره تحلیل می‌شوند
+ARCHIVE_VERSION = "4"  # با تغییر آن، همه‌ی اسناد یک بار دوباره تحلیل می‌شوند
 
 # واژه‌های هر دسته (به شکل یکسان‌شده‌ی textnorm.normalize)
 _KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -264,6 +264,58 @@ def invoice_fields(text: str, flat: str) -> dict[str, Any]:
     if pg and float(pg.group(1).replace("/", ".")) <= 100:
         info["progress"] = {"pos": pg.start(), "value": float(pg.group(1).replace("/", "."))}
     return info
+
+
+SHEET_ROWS: tuple[tuple[str, str], ...] = (
+    ("claimed_period", "درخواستی پیمانکار طی دوره"),
+    ("approved_period", "تأییدشده‌ی مشاور طی دوره"),
+    ("claimed_total", "درخواستی پیمانکار تاکنون"),
+    ("approved_total", "تأییدشده‌ی مشاور تاکنون"),
+    ("contract_total", "مبلغ کل قرارداد (طبق صورت‌وضعیت)"),
+)
+
+
+def best_sheet(sheets: list[dict]) -> dict | None:
+    """برگ خلاصه‌ی اصلی: آنکه «خلاصه/کل» در عنوانش هست، وگرنه بزرگ‌ترین مبلغ قرارداد."""
+    if not sheets:
+        return None
+    def score(sh: dict) -> tuple:
+        title = sh.get("title") or ""
+        return ("خلاصه" in title or " کل" in title, (sh.get("sum") or {}).get("contract") or 0,
+                len(sh.get("by_role") or {}))
+    return max(sheets, key=score)
+
+
+def apply_sheets(info: dict[str, Any], sheets: list[dict]) -> None:
+    """مبالغ صورت‌وضعیت از جدول خوانده‌شده (دقیق‌تر از جست‌وجوی برچسب در متن)."""
+    sh = best_sheet(sheets)
+    if not sh:
+        return
+    page, total, roles = sh["page"], sh.get("sum") or {}, sh.get("by_role") or {}
+    cons, contr = roles.get("مشاور") or {}, roles.get("پیمانکار") or {}
+    best_role = cons or contr or roles.get("کارفرما") or {}
+
+    def put(key: str, value: Any) -> None:
+        if value not in (None, 0):
+            info[key] = {"value": value, "page": page, "source": "table"}
+
+    put("work_total", total.get("total") or best_role.get("total"))
+    put("work_prev", total.get("prev") if "prev" in total else best_role.get("prev"))
+    period = total.get("period") or (total["total"] - total["prev"] if total.get("total") and "prev" in total else None) \
+        or best_role.get("period")
+    put("work_period", period)
+    put("claimed_period", contr.get("period"))
+    put("claimed_total", contr.get("total"))
+    put("approved_period", cons.get("period"))
+    put("approved_total", cons.get("total"))
+    contract = total.get("contract") or sum(s_["contract"] or 0 for s_ in sh.get("sections", [])) or None
+    put("contract_total", contract)
+    if contract and info.get("work_total"):
+        info["progress_fin"] = {"value": round(100 * info["work_total"]["value"] / contract, 2), "page": page}
+    info.pop("work_check", None)
+    info["sheets"] = {"value": [{k: v for k, v in x.items() if k != "groups"} for x in sheets[:6]], "page": page}
+    if any(x.get("corrected") for x in sheets):
+        info["sheet_fixes"] = {"value": [c for x in sheets for c in x.get("corrected", [])], "page": page}
 
 
 # ───────────────────────── خلاصه‌ی استخراجی ─────────────────────────
@@ -549,15 +601,22 @@ def _doc_text(conn, doc_id: int, page_texts: list[tuple[int, str]] | None) -> tu
     return "".join(parts), starts, pages
 
 
-def analyze(doc_id: int, page_texts: list[tuple[int, str]] | None = None) -> dict[str, Any]:
+def analyze(doc_id: int, page_texts: list[tuple[int, str]] | None = None,
+            sheets: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     with db.connect() as conn:
         d = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
         if not d:
             raise db.NotFound("سند پیدا نشد")
         text, starts, pages = _doc_text(conn, doc_id, page_texts)
+        if sheets is None:
+            sheets = json.loads(d["sheets"] or "[]")
+        else:
+            conn.execute("UPDATE documents SET sheets = ? WHERE id = ?", (json.dumps(sheets, ensure_ascii=False), doc_id))
         edited = set(json.loads(d["edited"] or "[]"))
         category = d["category"] if "category" in edited else classify(d["title"], text, d["kind"], d["pages"] or 1)
         info = extract(text, category) if text.strip() else {}
+        if category == "invoice" and sheets:
+            apply_sheets(info, sheets)
         if category == "invoice" and "invoice_no" not in info:  # «وضعیت شماره ۳.pdf»
             tm = re.search(r"(\d{1,3})(?!\d)", _prep(d["title"]))
             if tm:
@@ -706,6 +765,14 @@ def doc_brief(d: dict) -> list[dict[str, Any]]:
         add("دوره‌ی کارکرد", "period")
         for key, label, _ in INVOICE_ROWS:
             add(label, key, money=True, computed=bool((info.get(key) or {}).get("computed")))
+        for key, label in SHEET_ROWS:
+            add(label, key, money=True)
+        if info.get("progress_fin"):
+            add("پیشرفت مالی (کارکرد ÷ مبلغ قرارداد)", value=f"{info['progress_fin']['value']:g}٪")
+        if info.get("sheet_fixes"):
+            rows.append({"label": "🔧 اصلاح خودکار", "value": "؛ ".join(
+                f"{f['row']} ({ {'prev': 'تا دوره قبل', 'period': 'طی دوره', 'total': 'تاکنون'}.get(f['field'], f['field']) }): "
+                f"{f['read']:,} ← {f['fixed']:,}" for f in info["sheet_fixes"]["value"])})
         add("درصد پیشرفت", value=f"{info['progress']['value']:g}٪" if info.get("progress") else None)
         if info.get("work_check"):
             rows.append({"label": "⚠️ کنترل جمع", "value": "کارکرد قبلی + این دوره با جمع کارکرد نمی‌خواند؛ اعداد را با سند چک کنید"})
@@ -824,10 +891,16 @@ def project_summary(project_id: int | None) -> dict[str, Any]:
             "date": d["date"], "no": (i.get("invoice_no") or {}).get("value"),
             "kind_fa": (i.get("invoice_kind") or {}).get("value"), "period": (i.get("period") or {}).get("value"),
             **{k: (i.get(k) or {}).get("value") for k, _, _ in INVOICE_ROWS},
+            **{k: (i.get(k) or {}).get("value") for k, _ in SHEET_ROWS},
             "progress": (i.get("progress") or {}).get("value"), "check_failed": bool(i.get("work_check")),
             **_src(d, i.get("work_total") or i.get("net") or i.get("amount")),
         })
     last_invoice = invoices[-1] if invoices else None
+    inv_contract = next((x for x in reversed(invoices) if x.get("contract_total")), None)
+    if inv_contract and not any(f["key"] == "contract_amount" for f in facts):
+        # مبلغ قرارداد در خود قرارداد پیدا نشد؛ از جدول صورت‌وضعیت
+        facts.append({"key": "contract_amount", "label": "مبلغ قرارداد (طبق صورت‌وضعیت)", "value": inv_contract["contract_total"],
+                      "money": True, **{k: inv_contract[k] for k in ("doc_id", "doc_title", "page", "kind")}})
     contract_amount = next((f["value"] for f in facts if f["key"] == "contract_amount"), None) or (project or {}).get("contract_amount")
     for x in invoices:
         x["total_pct"] = round(100 * x["work_total"] / contract_amount, 1) if x.get("work_total") and contract_amount else None
