@@ -898,12 +898,13 @@ function summaryHTML(s) {
     const cell = (v) => (v ? `<span title="${num(v)} ${META.currency}">${shortMoney(v)}</span>` : "—");
     rows.push(`<h4>🧾 صورت‌وضعیت‌ها (${num(s.invoices.length)})</h4>
       <div class="table-wrap"><table class="inv-table">
-        <thead><tr><th>شماره</th><th>دوره</th><th>کارکرد این دوره</th><th>جمع کارکرد</th><th>کسورات</th><th>خالص قابل پرداخت</th><th></th></tr></thead>
+        <thead><tr><th>شماره</th><th>دوره</th><th>کارکرد این دوره</th><th>جمع کارکرد</th><th>درخواستی پیمانکار / تأیید مشاور (دوره)</th><th>کسورات</th><th>خالص قابل پرداخت</th><th></th></tr></thead>
         <tbody>${s.invoices.map((x) => `<tr>
           <td>${x.no ? num(x.no) : "—"}${x.kind_fa ? ` <small class="muted">${esc(x.kind_fa)}</small>` : ""}</td>
           <td>${esc(faDigits(x.period || x.date))}</td>
           <td>${cell(x.work_period)}</td>
           <td>${cell(x.work_total)}${x.total_pct ? ` <small class="muted">(${num(x.total_pct)}٪)</small>` : ""}</td>
+          <td>${x.claimed_period || x.approved_period ? `${cell(x.claimed_period)} / ${cell(x.approved_period)}` : "—"}</td>
           <td>${cell(x.deductions)}</td>
           <td><b>${cell(x.net)}</b></td>
           <td>${x.check_failed ? `<span class="badge amber" title="جمع‌ها نمی‌خواند؛ با سند چک کنید">⚠️</span>` : ""}<a href="#" class="src-link" data-brief="${x.doc_id}" title="خلاصه‌ی سند">📋</a></td>
@@ -953,6 +954,12 @@ function showBrief(id) {
     <table class="brief">${d.brief.map((r) => `<tr><th>${esc(r.label)}</th><td>${r.money
       ? `<b>${money(r.value)}</b> <small class="muted">(${shortMoney(r.value)}${r.computed ? "، محاسبه‌شده" : ""})</small>`
       : esc(faDigits(r.value))}${r.page && d.pages > 1 ? ` <a href="#" class="src-link" data-src="${d.id}:${r.page}:${d.kind}">ص ${num(r.page)}</a>` : ""}</td></tr>`).join("")}</table>
+    ${(d.info?.sheets?.value || []).map((sh) => `<h4>📊 ${esc(faDigits(sh.title || "جدول مالی"))} <small class="muted">(صفحه ${num(sh.page)})</small></h4>
+      <div class="table-wrap"><table class="inv-table">
+        <thead><tr><th>بخش</th><th>رکن</th><th>مبلغ قرارداد</th><th>تا دوره قبل</th><th>طی دوره</th><th>تاکنون</th></tr></thead>
+        <tbody>${sh.rows.map((r) => `<tr class="${r.sum ? "sum" : ""}"><td>${esc(r.sum ? "جمع" : r.section || "")}</td><td>${esc(r.role || "")}</td>
+          ${["contract", "prev", "period", "total"].map((k) => `<td title="${r[k] != null ? num(r[k]) : ""}">${r[k] ? shortMoney(r[k]) : r[k] === 0 ? "۰" : ""}</td>`).join("")}</tr>`).join("")}</tbody>
+      </table></div>`).join("")}
     ${items.length ? `<h4>مصوبات</h4><ol class="items">${items.map((i) => `<li>${esc(faDigits(i))}</li>`).join("")}</ol>` : ""}
     ${points.length ? `<h4>خلاصه‌ی متن</h4><ul class="points">${points.map((p) => `<li>${esc(faDigits(p))}</li>`).join("")}</ul>`
       : d.info?.table ? `<p class="muted">📊 متن این سند بیشتر جدول و عدد است.</p>` : ""}
