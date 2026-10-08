@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -29,6 +30,35 @@ from .config import settings
 
 log = logging.getLogger(__name__)
 
+# Tesseract به‌طور پیش‌فرض چند رشته (thread) می‌سازد؛ روی سرور با نیم پردازنده این رشته‌ها با هم رقابت
+# می‌کنند و کار چند برابر کند می‌شود و حافظه‌ی بیشتری می‌گیرد
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")
+MAX_ATTEMPTS = 3  # اگر پردازش یک صفحه این‌قدر بار نیمه‌کاره ماند (مثلاً کمبود حافظه)، آن صفحه رد می‌شود
+MAX_SHEET_PAGES = 6
+
+
+def release_memory() -> None:
+    """برگرداندن حافظه‌ی آزادشده به سیستم بعد از هر صفحه (مهم روی سرور کم‌حافظه).
+
+    PyMuPDF تصویرهای اسکن‌شده‌ی هر صفحه را در حافظه‌ی نهان خودش نگه می‌دارد (تا ۲۵۶ مگابایت)؛ روی سرور
+    ۵۱۲ مگابایتی همین باعث پر شدن حافظه، بسته شدن برنامه و شروع دوباره‌ی پردازش از اول می‌شد.
+    """
+    import gc
+
+    try:
+        import pymupdf
+
+        pymupdf.TOOLS.store_shrink(100)
+    except Exception:
+        pass
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
 PDF_EXT = {".pdf"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 TEXT_EXT = {".txt", ".md"}
@@ -38,7 +68,7 @@ ALLOWED_EXT = PDF_EXT | IMAGE_EXT | TEXT_EXT | DOCX_EXT
 CHUNK_CHARS = 900
 CHUNK_OVERLAP = 150
 OCR_DPI = 300
-OCR_MAX_PIXELS = 4200  # بیشترین طول تصویر برای OCR (برای نقشه‌های بزرگ)
+OCR_MAX_PIXELS = 3500  # بیشترین طول تصویر برای OCR (برای نقشه‌های بزرگ؛ و حافظه‌ی کمتر)
 GOOD_SCORE = 0.97
 
 
@@ -166,9 +196,14 @@ def read_sheet_page(path: Path, kind: str, page_no: int) -> dict[str, Any] | Non
         with pymupdf.open(path) as pdf:
             page = pdf[page_no - 1]
             longest = max(page.rect.width, page.rect.height) / 72
-            pix = page.get_pixmap(dpi=min(300, int(4200 / max(longest, 1))), colorspace=pymupdf.csGRAY)
+            pix = page.get_pixmap(dpi=min(250, int(3300 / max(longest, 1))), colorspace=pymupdf.csGRAY)
             img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
-    return tables.read_sheet(img)
+            del pix
+    try:
+        return tables.read_sheet(img)
+    finally:
+        del img
+        release_memory()
 
 
 # ───────────────────────── استخراج متن ─────────────────────────
@@ -392,8 +427,8 @@ def get_document(doc_id: int) -> dict[str, Any]:
 
 
 def reprocess(doc_id: int) -> None:
-    with db.connect() as conn:
-        conn.execute("UPDATE documents SET status='queued', error=NULL WHERE id = ?", (doc_id,))
+    with db.connect() as conn:  # از اول (نه ادامه‌ی کار نیمه‌تمام)
+        conn.execute("UPDATE documents SET status='queued', error=NULL, pages_done=0, attempts=0 WHERE id = ?", (doc_id,))
     worker.wake()
 
 
@@ -415,16 +450,42 @@ def render_page_png(doc_id: int, page: int, zoom: float = 1.6) -> bytes:
 
 
 def process_document(doc_id: int) -> None:
+    """خواندن و نمایه‌سازی سند، صفحه به صفحه.
+
+    پیشرفت (متن، صفحه‌های اول و جدول‌ها) هر چند صفحه ذخیره می‌شود تا اگر برنامه وسط کار ری‌استارت شد
+    (مثلاً کمبود حافظه)، از همان صفحه ادامه دهد نه از اول. صفحه‌ای که چند بار باعث توقف شده رد می‌شود.
+    """
     d = get_document(doc_id)
+    start = d["pages_done"] or 0  # > ۰ یعنی ادامه‌ی کار نیمه‌تمام
+    attempts = (d["attempts"] or 0) + 1
+    skipped: list[int] = json.loads(d["skipped_pages"] or "[]") if start else []
+    if start and attempts > MAX_ATTEMPTS and start + 1 not in skipped:
+        skipped.append(start + 1)  # این صفحه بارها کار را متوقف کرده
+        log.warning("صفحه‌ی %s سند %s رد شد (پردازشش %s بار نیمه‌کاره ماند)", start + 1, doc_id, MAX_ATTEMPTS)
+        attempts = 1
     with db.connect() as conn:
-        conn.execute("DELETE FROM doc_fts WHERE doc_id = ?", (doc_id,))
-        conn.execute("DELETE FROM doc_chunks WHERE doc_id = ?", (doc_id,))
-        conn.execute(
-            "UPDATE documents SET status='processing', pages_done=0, ocr_pages=0, fixed_pages=0, weak_pages=0, "
-            "chunks=0, error=NULL WHERE id=?", (doc_id,),
-        )
-    stats = {"ocr": 0, "fixed": 0, "weak": 0, "chunks": 0}
+        conn.execute("DELETE FROM doc_fts WHERE doc_id = ? AND chunk_id IN (SELECT id FROM doc_chunks WHERE doc_id = ? AND page > ?)",
+                     (doc_id, doc_id, start))
+        conn.execute("DELETE FROM doc_chunks WHERE doc_id = ? AND page > ?", (doc_id, start))
+        if start:
+            conn.execute("UPDATE documents SET status='processing', attempts=?, skipped_pages=?, error=NULL WHERE id=?",
+                         (attempts, json.dumps(skipped), doc_id))
+        else:
+            conn.execute(
+                "UPDATE documents SET status='processing', pages_done=0, ocr_pages=0, fixed_pages=0, weak_pages=0, "
+                "chunks=0, error=NULL, attempts=1, skipped_pages=NULL, head_text=NULL, sheets=NULL WHERE id=?", (doc_id,),
+            )
+    stats = {"ocr": d["ocr_pages"] if start else 0, "fixed": d["fixed_pages"] if start else 0,
+             "weak": d["weak_pages"] if start else 0, "chunks": 0}
+    if start:
+        with db.connect() as conn:
+            stats["chunks"] = conn.execute("SELECT COUNT(*) FROM doc_chunks WHERE doc_id = ?", (doc_id,)).fetchone()[0]
     pending: list[tuple[int, int, str, str]] = []
+    # صفحه‌های اول و آخر و جدول‌های مالی (برای بایگانی)؛ در ادامه‌ی کار از ذخیره‌ی قبلی خوانده می‌شوند
+    saved = json.loads(d["head_text"] or "[]") if start else []
+    head_pages: list[tuple[int, str]] = [tuple(x) for x in saved if x[0] <= min(start, archive.ANALYZE_PAGES)]
+    tail_pages: list[tuple[int, str]] = [tuple(x) for x in saved if archive.ANALYZE_PAGES < x[0] <= start][-2:]
+    sheets: list[dict[str, Any]] = [x for x in json.loads(d["sheets"] or "[]") if x["page"] <= start] if start else []
 
     def flush(done: int, total: int) -> None:
         with db.connect() as conn:
@@ -437,22 +498,27 @@ def process_document(doc_id: int) -> None:
                 conn.execute("INSERT INTO doc_fts (norm, chunk_id, doc_id) VALUES (?, ?, ?)", (norm, cur.lastrowid, doc_id))
             conn.execute(
                 "UPDATE documents SET pages=?, pages_done=?, ocr_pages=?, fixed_pages=?, weak_pages=?, chunks=?, "
-                "updated_at=? WHERE id=?",
-                (total, done, stats["ocr"], stats["fixed"], stats["weak"], stats["chunks"], db.now_str(), doc_id),
+                "attempts=0, head_text=?, sheets=?, updated_at=? WHERE id=?",
+                (total, done, stats["ocr"], stats["fixed"], stats["weak"], stats["chunks"],
+                 json.dumps(head_pages + tail_pages, ensure_ascii=False), json.dumps(sheets, ensure_ascii=False),
+                 db.now_str(), doc_id),
             )
         pending.clear()
 
     total = 0
-    head_pages: list[tuple[int, str]] = []  # متن کامل صفحه‌های اول برای بایگانی (سطرها حفظ می‌شوند)
-    tail_pages: list[tuple[int, str]] = []
-    sheets: list[dict[str, Any]] = []  # جدول‌های مالی خوانده‌شده (صورت‌وضعیت)
     invoice_like = archive.classify(d["title"], "", d["kind"], 1) == "invoice"
     read_tables = ocr_available() and d["kind"] in ("pdf", "image")
     for page_no, total, extract in iter_pages(Path(d["path"]), d["kind"]):
         if worker.stopping:
             return
-        text, method = extract()
-        if read_tables and page_no <= archive.ANALYZE_PAGES and (invoice_like or tables.looks_financial(text)):
+        if page_no <= start:
+            continue  # قبلاً خوانده شده
+        if page_no in skipped:
+            text, method = "", "weak"
+        else:
+            text, method = extract()
+        if (read_tables and page_no not in skipped and page_no <= archive.ANALYZE_PAGES and len(sheets) < MAX_SHEET_PAGES
+                and (tables.looks_financial(text) or (invoice_like and page_no <= 3))):
             try:
                 sheet = read_sheet_page(Path(d["path"]), d["kind"], page_no)
                 if sheet:
@@ -468,9 +534,14 @@ def process_document(doc_id: int) -> None:
         for seq, chunk in enumerate(chunk_text(text)):
             pending.append((page_no, seq, chunk, method))
             stats["chunks"] += 1
-        if page_no % 5 == 0 or page_no == total:
+        release_memory()
+        if page_no % 3 == 0 or page_no == total:
             flush(page_no, total)
     flush(total, total)
+    if skipped:
+        with db.connect() as conn:
+            conn.execute("UPDATE documents SET error=? WHERE id=?",
+                         (f"صفحه‌ی {', '.join(map(str, skipped))} خوانده نشد (پردازشش چند بار نیمه‌کاره ماند)", doc_id))
 
     # بردارهای معنایی
     if embedder.available():
@@ -555,7 +626,9 @@ class Worker:
         n = 0
         while True:
             with db.connect() as conn:
-                row = conn.execute("SELECT id FROM documents WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
+                # اول کارهای نیمه‌تمام، بعد فایل‌های کوچک‌تر؛ تا یک سند خیلی بزرگ بقیه را معطل نکند
+                row = conn.execute("SELECT id FROM documents WHERE status='queued' "
+                                   "ORDER BY (pages_done > 0) DESC, size, id LIMIT 1").fetchone()
             if not row:
                 return n
             try:

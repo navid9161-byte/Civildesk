@@ -1,3 +1,4 @@
+import json
 import io
 import shutil
 
@@ -172,3 +173,63 @@ def test_backfill_vectors_after_enabling_model(monkeypatch):
     with db.connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM doc_chunks WHERE vec IS NULL").fetchone()[0] == 0
     assert documents.backfill_vectors() == 0
+
+
+def _pdf(n: int) -> bytes:
+    import pymupdf
+
+    doc = pymupdf.open()
+    for i in range(1, n + 1):
+        page = doc.new_page()
+        page.insert_text((50, 80), f"Page {i}: the contractor shall complete the works of section {i} within the time "
+                                   f"for completion and the employer shall pay the amount of this section.", fontsize=9)
+    return doc.tobytes()
+
+
+def _calls(monkeypatch) -> list[int]:
+    seen: list[int] = []
+    orig = documents._best_text
+
+    def counting(text_layer, ocr_fn):
+        seen.append(int(text_layer.split(":")[0].split()[-1]))
+        return orig(text_layer, None)
+
+    monkeypatch.setattr(documents, "_best_text", counting)
+    return seen
+
+
+def test_interrupted_processing_resumes(monkeypatch):
+    from civildesk import db
+
+    d = documents.add_document(io.BytesIO(_pdf(7)), "long.pdf")
+    documents.worker.run_pending()
+    with db.connect() as conn:  # مثل ری‌استارت وسط کار: ۳ صفحه خوانده و ذخیره شده بود
+        conn.execute("UPDATE documents SET status='queued', pages_done=3 WHERE id=?", (d["id"],))
+        conn.execute("DELETE FROM doc_chunks WHERE doc_id=? AND page > 3", (d["id"],))
+    seen = _calls(monkeypatch)
+    documents.worker.run_pending()
+    assert seen == [4, 5, 6, 7]  # صفحه‌های ۱ تا ۳ دوباره خوانده نشدند
+    doc = documents.get_document(d["id"])
+    assert doc["status"] == "ready" and doc["pages_done"] == 7
+    with db.connect() as conn:
+        pages = [r[0] for r in conn.execute("SELECT DISTINCT page FROM doc_chunks WHERE doc_id=? ORDER BY page", (d["id"],))]
+    assert pages == [1, 2, 3, 4, 5, 6, 7]
+    assert len(json.loads(doc["head_text"])) == 7  # متن صفحه‌های اول هم کامل است
+
+
+def test_page_that_keeps_crashing_is_skipped(monkeypatch):
+    from civildesk import db
+
+    d = documents.add_document(io.BytesIO(_pdf(5)), "poison.pdf")
+    documents.worker.run_pending()
+    with db.connect() as conn:  # صفحه‌ی ۳ سه بار کار را نیمه‌کاره گذاشته
+        conn.execute("UPDATE documents SET status='queued', pages_done=2, attempts=3 WHERE id=?", (d["id"],))
+    seen = _calls(monkeypatch)
+    documents.worker.run_pending()
+    assert seen == [4, 5]
+    doc = documents.get_document(d["id"])
+    assert doc["status"] == "ready" and "صفحه‌ی 3" in doc["error"]
+    documents.reprocess(d["id"])  # «پردازش دوباره» از اول شروع می‌کند
+    seen.clear()
+    documents.worker.run_pending()
+    assert seen == [1, 2, 3, 4, 5] and documents.get_document(d["id"])["error"] is None

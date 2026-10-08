@@ -666,7 +666,8 @@ def upgrade() -> None:
             return
         # اسناد تا ۴۰ صفحه یک بار کامل دوباره خوانده می‌شوند (OCR بهتر + متن صفحه برای خلاصه)؛
         # اسناد بزرگ‌تر فقط دوباره تحلیل می‌شوند تا پردازنده‌ی سرور مدت طولانی مشغول نماند
-        n = conn.execute("UPDATE documents SET status='queued' WHERE status IN ('ready','error') AND pages <= 40").rowcount
+        n = conn.execute("UPDATE documents SET status='queued', pages_done=0, attempts=0 "
+                         "WHERE status IN ('ready','error') AND pages <= 40").rowcount
         if n:
             log.info("%d سند برای خواندن دوباره در صف قرار گرفت", n)
         conn.execute("UPDATE documents SET analyzed_at = NULL")
@@ -825,7 +826,10 @@ def overview() -> dict[str, Any]:
             "ORDER BY CASE p.status WHEN 'active' THEN 0 WHEN 'tender' THEN 1 WHEN 'on_hold' THEN 2 ELSE 3 END, p.id DESC"
         ).fetchall()
         loose = conn.execute("SELECT COUNT(*) FROM documents WHERE project_id IS NULL").fetchone()[0]
-    return {"projects": [dict(r) for r in rows], "unassigned": loose, "categories": CATEGORIES}
+        cur = conn.execute("SELECT id, title, pages, pages_done, updated_at FROM documents WHERE status='processing' LIMIT 1").fetchone()
+        queued = conn.execute("SELECT COUNT(*) FROM documents WHERE status='queued'").fetchone()[0]
+    return {"projects": [dict(r) for r in rows], "unassigned": loose, "categories": CATEGORIES,
+            "queue": {"current": dict(cur) if cur else None, "queued": queued}}
 
 
 def _src(d: dict, item: dict | None = None) -> dict[str, Any]:

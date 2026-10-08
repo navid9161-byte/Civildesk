@@ -26,6 +26,7 @@ COPY civildesk ./civildesk
 ENV CIVILDESK_DB=/data/civildesk.db \
     CIVILDESK_DOCS_DIR=/data/docs \
     HF_HUB_OFFLINE=1 \
+    OMP_THREAD_LIMIT=1 \
     PYTHONUNBUFFERED=1
 VOLUME /data
 # پورت پیش‌فرض ۸۰ (همان پیش‌فرض لیارا)؛ با متغیر PORT قابل تغییر است
