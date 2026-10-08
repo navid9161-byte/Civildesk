@@ -268,3 +268,37 @@ def test_archived_invoice_to_record():
     import pytest
     with pytest.raises(db.ValidationError):
         archive.to_invoice_record(d["id"])  # تکراری
+
+
+def test_letters_register_and_two_line_summary():
+    p = _project()
+    _add(LETTER, "letter.txt", project_id=p["id"])
+    _add(CONTRACT, "c.txt", project_id=p["id"])  # قرارداد در دفتر نامه‌ها نمی‌آید
+    # فایلی که از «بایگانی نامه‌ها» بارگذاری شده، نامه می‌ماند حتی اگر تشخیص خودکار چیز دیگری بگوید
+    d = documents.add_document(io.BytesIO("گزارش بازدید از کارگاه و وضعیت ایمنی پرسنل در هفته‌ی گذشته".encode()),
+                               "note.txt", project_id=p["id"], category="letter")
+    documents.worker.run_pending()
+    reg = archive.letters_register(p["id"])
+    assert d["id"] in [x["id"] for x in reg["letters"]] and len(reg["letters"]) == 2
+    x = next(x for x in reg["letters"] if x["id"] != d["id"])
+    assert x["doc_no"] == "1403/ص/245" and x["subject"] == "تأخیر در اجرای سقف طبقه‌ی سوم"
+    assert x["to"].startswith("جناب آقای") and x["deadline"] == "1403/05/22" and x["late"]
+    assert x["summary"].startswith("با توجه به بازدید") and "خواهشمند است" in x["summary"] and len(x["summary"]) <= 231
+    ov = archive.overview()
+    assert ov["projects"][0]["letters"] == 2
+    name, data = archive.letters_csv(p["id"])
+    text = data.decode("utf-8")
+    assert text.startswith("﻿ردیف,تاریخ,شماره") and "1403/ص/245" in text and name.endswith(".csv")
+
+
+def test_letters_api():
+    client = TestClient(app)
+    p = _project()
+    r = client.post("/api/documents", files={"files": ("l.txt", LETTER.encode())},
+                    data={"project_id": str(p["id"]), "category": "letter"})
+    assert r.status_code == 201
+    documents.worker.run_pending()
+    assert client.get(f"/api/letters/{p['id']}").json()["letters"][0]["summary"]
+    r = client.get(f"/api/letters/{p['id']}/export.csv")
+    assert r.status_code == 200 and "text/csv" in r.headers["content-type"]
+    assert client.post("/api/documents", files={"files": ("x.txt", b"x")}, data={"category": "bad"}).status_code == 400

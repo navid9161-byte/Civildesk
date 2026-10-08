@@ -353,8 +353,12 @@ def _safe_name(name: str) -> str:
 
 
 def add_document(fileobj: BinaryIO, filename: str, title: str | None = None,
-                 project_id: int | None = None, max_bytes: int | None = None) -> dict[str, Any]:
+                 project_id: int | None = None, max_bytes: int | None = None,
+                 category: str | None = None) -> dict[str, Any]:
+    """category: دسته‌ی تعیین‌شده توسط کاربر (مثلاً بارگذاری از «بایگانی نامه‌ها»)؛ تشخیص خودکار آن را عوض نمی‌کند."""
     kind = kind_of(filename)
+    if category is not None and category not in archive.CATEGORIES:
+        raise db.ValidationError("دسته‌ی نامعتبر")
     max_bytes = max_bytes or int(os.getenv("CIVILDESK_MAX_UPLOAD_MB", "300")) * 1024 * 1024
     h = hashlib.sha256()
     tmp = tempfile.NamedTemporaryFile(dir=docs_dir(), delete=False, suffix=".part")
@@ -376,13 +380,17 @@ def add_document(fileobj: BinaryIO, filename: str, title: str | None = None,
                 os.unlink(tmp.name)
                 if project_id and dup["project_id"] is None:  # همان فایل، این بار داخل بایگانی یک پروژه
                     conn.execute("UPDATE documents SET project_id=?, project_auto=0 WHERE id=?", (project_id, dup["id"]))
-                    dup = conn.execute("SELECT * FROM documents WHERE id = ?", (dup["id"],)).fetchone()
+                if category and dup["category"] != category:  # همان فایل، این بار به‌عنوان نامه
+                    edited = sorted(set(json.loads(dup["edited"] or "[]")) | {"category"})
+                    conn.execute("UPDATE documents SET category=?, edited=? WHERE id=?", (category, json.dumps(edited), dup["id"]))
+                dup = conn.execute("SELECT * FROM documents WHERE id = ?", (dup["id"],)).fetchone()
                 return {**dict(dup), "duplicate": True}
             now = db.now_str()
             cur = conn.execute(
-                "INSERT INTO documents (title, filename, path, sha256, size, kind, status, project_id, created_at, updated_at) "
-                "VALUES (?, ?, '', ?, ?, ?, 'queued', ?, ?, ?)",
-                (title or Path(filename).stem, filename, digest, size, kind, project_id, now, now),
+                "INSERT INTO documents (title, filename, path, sha256, size, kind, status, project_id, category, edited, "
+                "created_at, updated_at) VALUES (?, ?, '', ?, ?, ?, 'queued', ?, ?, ?, ?, ?)",
+                (title or Path(filename).stem, filename, digest, size, kind, project_id, category,
+                 json.dumps(["category"]) if category else None, now, now),
             )
             doc_id = cur.lastrowid
             final = docs_dir() / f"{doc_id}_{_safe_name(filename)}"

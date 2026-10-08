@@ -9,6 +9,7 @@ const faDigits = (s) => String(s ?? "").replace(/\d/g, (d) => "۰۱۲۳۴۵۶۷�
 
 let META = null;
 let PROJECTS = [];
+let CATS = {};  // دسته‌های اسناد بایگانی (از سرور)
 const state = { tab: localStorageGet("tab") || "dashboard", filters: {} };
 
 function localStorageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
@@ -55,6 +56,7 @@ const badge = (entity, field, value) =>
 const ICONS = {
   dashboard: "M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z",
   archive: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM3 10h18M9 14h6",
+  letters: "M3 5h18v14H3zM3 6l9 7 9-7",
   docs: "M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5zM4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5M8 7h8M8 11h6",
   chat: "M12 8V4H8M4 8h16v12H4zM2 14h2M20 14h2M9 13v2M15 13v2",
   tasks: "M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11",
@@ -76,6 +78,7 @@ const ico = (name, cls = "ico") => `<svg class="${cls}" viewBox="0 0 24 24" aria
 const TABS = [
   ["dashboard", "داشبورد"],
   ["archive", "بایگانی پروژه‌ها"],
+  ["letters", "بایگانی نامه‌ها"],
   ["docs", "اسناد و پرسش"],
   ["chat", "دستیار هوشمند"],
   ["tasks", "وظایف"],
@@ -86,7 +89,7 @@ const TABS = [
   ["contacts", "مخاطبین"],
   ["notes", "یادداشت‌ها"],
 ];
-const BOTTOM_TABS = ["dashboard", "archive", "tasks", "docs"];
+const BOTTOM_TABS = ["dashboard", "archive", "letters", "tasks"];
 const tabLabel = (k) => (TABS.find(([key]) => key === k) || [k, k])[1];
 
 // تب «دستیار هوشمند» فقط وقتی مدل هوش مصنوعی تنظیم شده باشد نمایش داده می‌شود
@@ -129,6 +132,7 @@ async function render() {
     else if (state.tab === "chat") await renderChat(view);
     else if (state.tab === "docs") await renderDocs(view);
     else if (state.tab === "archive") await renderArchive(view);
+    else if (state.tab === "letters") await renderLetters(view);
     else await renderEntity(view, state.tab);
   } catch (e) {
     view.innerHTML = `<div class="card error">${esc(e.message)}</div>`;
@@ -684,11 +688,12 @@ function showPage(docId, page, kind) {
 }
 
 // فایل‌ها یکی‌یکی فرستاده می‌شوند تا با قطع شدن اینترنت فقط همان فایل از دست برود
-function uploadOne(file, onProgress, projectId) {
+function uploadOne(file, onProgress, projectId, category) {
   return new Promise((resolve) => {
     const fd = new FormData();
     fd.append("files", file);
     if (projectId) fd.append("project_id", projectId);
+    if (category) fd.append("category", category);
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/api/documents");
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
@@ -704,7 +709,7 @@ function uploadOne(file, onProgress, projectId) {
   });
 }
 
-async function upload(fileList, view, projectId = null, rerender = renderDocs) {
+async function upload(fileList, view, projectId = null, rerender = renderDocs, category = null) {
   const files = [...fileList];
   if (!files.length) return;
   const prog = $("#up-prog");
@@ -714,7 +719,7 @@ async function upload(fileList, view, projectId = null, rerender = renderDocs) {
   const failed = [];
   for (let i = 0; i < files.length; i++) {
     if (label) label.textContent = `در حال بارگذاری فایل ${num(i + 1)} از ${num(files.length)}: ${files[i].name}`;
-    const r = await uploadOne(files[i], (frac) => { prog.firstElementChild.style.width = `${(100 * (i + frac)) / files.length}%`; }, projectId);
+    const r = await uploadOne(files[i], (frac) => { prog.firstElementChild.style.width = `${(100 * (i + frac)) / files.length}%`; }, projectId, category);
     if (r.ok) { ok++; if (r.duplicate) dup++; }
     else failed.push(`${files[i].name} (${r.error})`);
   }
@@ -740,6 +745,7 @@ const srcLink = (x) =>
 
 async function renderArchive(view) {
   const ov = await api("/api/archive");
+  CATS = ov.categories;
   const projects = ov.projects;
   if (!projects.length && !ov.unassigned) {
     view.innerHTML = `<div class="card empty-state">
@@ -1079,7 +1085,7 @@ document.addEventListener("click", (e) => {
 
 function editDocMeta(d) {
   const modal = $("#modal");
-  const cats = archiveState.data.categories;
+  const cats = archiveState.data?.categories || CATS;
   $("#modal-title").textContent = "ویرایش اطلاعات سند";
   $("#modal-error").textContent = "";
   $("#modal-body").innerHTML = `
@@ -1107,10 +1113,138 @@ function editDocMeta(d) {
       if (Object.keys(body).length) await api(`/api/documents/${d.id}`, { method: "PATCH", body });
       modal.close();
       toast("ذخیره شد ✔");
-      renderArchive($("#view"));
+      render();
     } catch (err) { $("#modal-error").textContent = err.message; }
   };
   modal.showModal();
+}
+
+
+// ───────────────────────── بایگانی نامه‌ها ─────────────────────────
+const lettersState = { q: "", cat: "", poll: null, data: null };
+
+async function renderLetters(view) {
+  const ov = await api("/api/archive");
+  CATS = ov.categories;
+  const projects = ov.projects;
+  if (!projects.length && !ov.unassigned_letters) {
+    view.innerHTML = `<div class="card empty-state"><h3>${ico("letters")} بایگانی نامه‌ها</h3>
+      <p>نامه‌های هر پروژه جدا نگه داشته می‌شوند و جلوی هر نامه خلاصه‌ی دوخطی متنش نوشته می‌شود. اول یک پروژه بسازید.</p>
+      <button class="btn primary" id="l-newp">+ پروژه‌ی جدید</button></div>`;
+    $("#l-newp").onclick = () => openForm("projects", null);
+    return;
+  }
+  const valid = (id) => (id === 0 ? ov.unassigned_letters > 0 : projects.some((p) => p.id === id));
+  if (archiveState.pid === null || !valid(archiveState.pid)) archiveState.pid = projects[0]?.id ?? 0;
+  const pid = archiveState.pid;
+  const data = await api(`/api/letters/${pid}`);
+  lettersState.data = data;
+  const p = data.project;
+  const chips = projects.map((x) =>
+    `<button class="chip ${x.id === pid ? "active" : ""}" data-lpid="${x.id}">${esc(x.name)} <span class="count">${num(x.letters)}</span></button>`).join("")
+    + (ov.unassigned_letters ? `<button class="chip ${pid === 0 ? "active" : ""}" data-lpid="0">بدون پروژه <span class="count">${num(ov.unassigned_letters)}</span></button>` : "");
+  const hasOrders = data.letters.some((x) => x.category === "order");
+  view.innerHTML = `
+    <div class="chips proj-chips no-print">${chips}</div>
+    <div class="card arch-head">
+      <div>
+        <h2>${ico("letters")} نامه‌های ${p ? `«${esc(p.name)}»` : "بدون پروژه"}</h2>
+        <div class="muted small">${num(data.letters.length)} نامه${data.letters.some((x) => x.late) ? ` · <span class="badge red">${num(data.letters.filter((x) => x.late).length)} مهلت گذشته</span>` : ""}</div>
+      </div>
+      <div class="arch-actions no-print">
+        <a class="btn" href="/api/letters/${pid}/export.csv">⬇️ خروجی اکسل</a>
+        <button class="btn" id="l-print">🖨 چاپ دفتر نامه‌ها</button>
+      </div>
+    </div>
+    <label class="drop no-print" id="drop">
+      <input type="file" id="files" multiple accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp,.docx,.txt" hidden>
+      <b>${p ? `افزودن نامه به «${esc(p.name)}»` : "افزودن نامه"}</b>
+      <small>PDF یا عکس نامه — چند فایل با هم. شماره، تاریخ، گیرنده، موضوع و خلاصه خودکار خوانده می‌شود.</small>
+      <div class="progress" id="up-prog" hidden><span style="width:0"></span></div>
+    </label>
+    ${data.pending ? `<div class="card notice no-print">⏳ ${num(data.pending)} نامه در حال خواندن است؛ خلاصه‌اش خودکار اضافه می‌شود…</div>` : ""}
+    <div class="card">
+      <div class="toolbar no-print">
+        <input type="search" id="l-q" placeholder="جستجو در شماره، موضوع، گیرنده و متن خلاصه…" value="${esc(lettersState.q)}">
+      </div>
+      ${hasOrders ? `<div class="chips no-print">${[["", "همه"], ["letter", "✉️ نامه"], ["order", "📣 ابلاغیه / دستور کار"]].map(([k, l]) =>
+        `<button class="chip ${lettersState.cat === k ? "active" : ""}" data-lcat="${k}">${l}</button>`).join("")}</div>` : ""}
+      <div id="l-list"></div>
+    </div>`;
+  renderLetterList();
+
+  view.querySelectorAll("[data-lpid]").forEach((b) => b.onclick = () => {
+    archiveState.pid = Number(b.dataset.lpid);
+    localStorageSet("archive_pid", archiveState.pid);
+    renderLetters(view);
+  });
+  view.querySelectorAll("[data-lcat]").forEach((b) => b.onclick = () => { lettersState.cat = b.dataset.lcat; renderLetters(view); });
+  $("#l-print").onclick = () => window.print();
+  $("#l-q").oninput = (e) => { lettersState.q = e.target.value; renderLetterList(); };
+  const input = $("#files");
+  const drop = $("#drop");
+  input.onchange = () => upload(input.files, view, pid || null, renderLetters, "letter");
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); upload(e.dataTransfer.files, view, pid || null, renderLetters, "letter"); });
+
+  clearTimeout(lettersState.poll);
+  if (data.pending) {
+    const again = () => {
+      if (state.tab !== "letters" || archiveState.pid !== pid) return;
+      if (document.querySelector("dialog[open]") || document.activeElement?.id === "l-q") lettersState.poll = setTimeout(again, 3000);
+      else renderLetters(view);
+    };
+    lettersState.poll = setTimeout(again, 3000);
+  }
+}
+
+function renderLetterList() {
+  const data = lettersState.data;
+  const nq = normFa(lettersState.q.trim());
+  const rows = data.letters.filter((x) => (!lettersState.cat || x.category === lettersState.cat)
+    && (!nq || normFa([x.subject, x.title, x.doc_no, x.to, x.from, x.summary].join(" ")).includes(nq)));
+  if (!rows.length) {
+    $("#l-list").innerHTML = `<div class="empty">${data.letters.length ? "نامه‌ای با این جستجو پیدا نشد." : "هنوز نامه‌ای در این بایگانی نیست؛ از کادر بالا اضافه کنید."}</div>`;
+    return;
+  }
+  const MONTHS = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"];
+  let html = "", month = null;
+  for (const x of rows) {
+    const [y, m, d] = (x.date || "").split("/");
+    const key = x.dated ? `${y}/${m}` : "—";
+    if (key !== month) {
+      month = key;
+      const n = rows.filter((r) => (r.dated ? r.date.slice(0, 7) : "—") === key).length;
+      html += `<h4 class="l-month">${x.dated ? `${MONTHS[Number(m) - 1]} ${faDigits(y)}` : "بدون تاریخ (به ترتیب بارگذاری)"} <span class="count">${num(n)}</span></h4>`;
+    }
+    const viewable = x.kind === "pdf" || x.kind === "image";
+    const busy = x.status === "queued" || x.status === "processing";
+    html += `<div class="letter-row">
+      <div class="l-date">${x.dated ? `<b>${faDigits(Number(d))}</b><span>${MONTHS[Number(m) - 1]}</span>` : `<span>${faDigits(x.date)}</span>`}</div>
+      <div class="l-body">
+        <div class="l-head">${x.category === "order" ? `<span class="badge cat">📣 ابلاغیه</span> ` : ""}<b>${esc(x.subject || x.title)}</b>
+          ${x.doc_no ? `<span class="muted">· شماره ${esc(faDigits(x.doc_no))}</span>` : ""}</div>
+        <div class="l-meta">
+          ${x.to ? `<span>به: ${esc(x.to.slice(0, 70))}</span>` : ""}
+          ${x.from ? `<span>از: ${esc(x.from.slice(0, 50))}</span>` : ""}
+          ${x.deadline ? `<span class="badge ${x.late ? "red" : "amber"}">مهلت ${faDigits(x.deadline)}${x.late ? " (گذشته)" : ""}</span>` : ""}
+          ${x.ocr ? `<span class="muted" title="از روی تصویر خوانده شده">OCR</span>` : ""}
+        </div>
+        <div class="l-sum" title="${esc(faDigits(x.summary))}">${busy
+          ? `⏳ ${x.status === "processing" && x.pages ? `در حال خواندن… ${num(Math.round((100 * x.pages_done) / x.pages))}٪` : "در صف خواندن…"}`
+          : x.summary ? esc(faDigits(x.summary)) : `<span class="muted">${x.error ? esc(x.error) : "متن این نامه برای خلاصه خوانا نبود؛ فایل را باز کنید."}</span>`}</div>
+      </div>
+      <div class="l-actions no-print">
+        ${viewable ? `<button class="btn" data-src="${x.id}:1:${x.kind}" title="دیدن نامه">👁</button>` : ""}
+        <a class="btn" href="/api/documents/${x.id}/file" target="_blank" title="فایل اصلی">📄</a>
+        <button class="btn" data-ledit="${x.id}" title="اصلاح شماره، تاریخ، موضوع، پروژه…">✏️</button>
+      </div>
+    </div>`;
+  }
+  $("#l-list").innerHTML = html;
+  $("#l-list").querySelectorAll(".l-sum").forEach((el) => el.onclick = () => el.classList.toggle("open"));
+  $("#l-list").querySelectorAll("[data-ledit]").forEach((b) => b.onclick = () => editDocMeta(data.letters.find((x) => x.id === Number(b.dataset.ledit))));
 }
 
 // ───────────────────────── شروع ─────────────────────────
