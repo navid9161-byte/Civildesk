@@ -782,7 +782,10 @@ async function renderArchive(view) {
       <small>قرارداد، نامه، صورتجلسه، صورت‌وضعیت، ضمانت‌نامه، عکس… — PDF یا عکس، چند فایل با هم. دسته‌بندی و خلاصه خودکار است.</small>
       <div class="progress" id="up-prog" hidden><span style="width:0"></span></div>
     </label>
-    ${s.pending ? `<div class="card notice no-print">⏳ ${num(s.pending)} سند در حال خواندن و تحلیل است؛ خلاصه خودکار به‌روز می‌شود…</div>` : ""}
+    ${ov.queue.current || ov.queue.queued ? `<div class="card notice no-print">⏳ ${ov.queue.current
+      ? `در حال خواندن «${esc(ov.queue.current.title)}»${ov.queue.current.pages ? ` — صفحه‌ی ${num(ov.queue.current.pages_done)} از ${num(ov.queue.current.pages)}` : ""}`
+      : "در انتظار شروع پردازش"}${ov.queue.queued ? ` · ${num(ov.queue.queued)} سند دیگر در صف` : ""}.
+      <span class="muted small">خلاصه‌ها خودکار به‌روز می‌شوند. سرور هر صفحه‌ی اسکن‌شده را در حدود نیم تا یک دقیقه می‌خواند؛ اگر برنامه وسط کار ری‌استارت شود، از همان صفحه ادامه می‌دهد.</span></div>` : ""}
     ${p ? summaryHTML(s) : ""}
     <div class="card ask no-print">
       <form id="arch-ask">
@@ -859,7 +862,7 @@ async function renderArchive(view) {
   bindAnswer(view);
 
   clearTimeout(archiveState.poll);
-  if (s.pending) {
+  if (s.pending || ov.queue.current || ov.queue.queued) {
     const again = () => {
       if (state.tab !== "archive" || archiveState.pid !== pid) return;
       const busy = archiveState.asking || document.querySelector("dialog[open]") || view.contains(document.activeElement) && document.activeElement.matches("input, textarea");
