@@ -821,14 +821,18 @@ def list_docs(project_id: int | None) -> list[dict[str, Any]]:
 def overview() -> dict[str, Any]:
     with db.connect() as conn:
         rows = conn.execute(
-            "SELECT p.id, p.name, p.status, COUNT(d.id) AS docs, MAX(COALESCE(d.doc_date, substr(d.created_at,1,10))) AS last "
+            "SELECT p.id, p.name, p.status, COUNT(d.id) AS docs, SUM(d.category IN ('letter', 'order')) AS letters, "
+            "MAX(COALESCE(d.doc_date, substr(d.created_at,1,10))) AS last "
             "FROM projects p LEFT JOIN documents d ON d.project_id = p.id GROUP BY p.id "
             "ORDER BY CASE p.status WHEN 'active' THEN 0 WHEN 'tender' THEN 1 WHEN 'on_hold' THEN 2 ELSE 3 END, p.id DESC"
         ).fetchall()
         loose = conn.execute("SELECT COUNT(*) FROM documents WHERE project_id IS NULL").fetchone()[0]
+        loose_letters = conn.execute("SELECT COUNT(*) FROM documents WHERE project_id IS NULL "
+                                     "AND category IN ('letter', 'order')").fetchone()[0]
         cur = conn.execute("SELECT id, title, pages, pages_done, updated_at FROM documents WHERE status='processing' LIMIT 1").fetchone()
         queued = conn.execute("SELECT COUNT(*) FROM documents WHERE status='queued'").fetchone()[0]
-    return {"projects": [dict(r) for r in rows], "unassigned": loose, "categories": CATEGORIES,
+    return {"projects": [{**dict(r), "letters": r["letters"] or 0} for r in rows], "unassigned": loose,
+            "unassigned_letters": loose_letters, "categories": CATEGORIES,
             "queue": {"current": dict(cur) if cur else None, "queued": queued}}
 
 
@@ -1007,3 +1011,81 @@ def list_docs_by_id(doc_id: int) -> list[dict[str, Any]]:
     with db.connect() as conn:
         rows = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchall()
     return [_doc_row(r) for r in rows]
+
+
+# ───────────────────────── دفتر نامه‌ها ─────────────────────────
+
+LETTER_CATS = ("letter", "order")
+_ASK = ("خواهشمند", "لازم است", "مقرر", "ابلاغ", "درخواست", "اعلام می", "دستور", "موظف", "ضروری", "اقدام")
+
+
+def _cut(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0].rstrip("،,:؛") + "…"
+
+
+def letter_summary(d: dict, limit: int = 230) -> str:
+    """خلاصه‌ی حدوداً دوخطی نامه: جمله‌ی زمینه (اولین جمله‌ی مهم) و جمله‌ی درخواست/دستور آن."""
+    info = d.get("info") or {}
+    pts = (info.get("points") or {}).get("value") or ([info["gist"]["value"]] if info.get("gist") else [])
+    pts = [p for p in pts if p]
+    if not pts:
+        return ""
+    first = pts[0]
+    ask = next((p for p in pts[1:] if any(c in textnorm.normalize(p) for c in _ASK)), None)
+    if ask is None and len(pts) > 1 and len(first) < limit * 0.6:
+        ask = pts[1]
+    if ask is None:
+        return _cut(first, limit)
+    head = _cut(first, max(70, limit - len(ask) - 1))
+    return _cut(f"{head} {ask}", limit)
+
+
+def letters_register(project_id: int | None) -> dict[str, Any]:
+    """نامه‌ها و ابلاغیه‌های یک پروژه، تازه‌ترین اول، با خلاصه‌ی دوخطی."""
+    project = None
+    if project_id:
+        with db.connect() as conn:
+            project = db.get(conn, "projects", project_id)
+    today = db.today_str()
+    letters = []
+    for d in list_docs(project_id):
+        if d.get("category") not in LETTER_CATS:
+            continue
+        info = d["info"]
+        due = None
+        dl = info.get("deadline")
+        if dl:
+            due = dl.get("date")
+            if not due and dl.get("days") and d.get("doc_date"):
+                try:
+                    due = jalali.add_days(d["doc_date"], dl["days"])
+                except ValueError:
+                    due = None
+        letters.append({
+            "id": d["id"], "title": d["title"], "kind": d["kind"], "category": d["category"], "status": d["status"],
+            "project_id": d["project_id"], "doc_date": d.get("doc_date"),
+            "pages": d["pages"], "pages_done": d["pages_done"], "ocr": bool(d.get("ocr_pages")),
+            "date": d["date"], "dated": bool(d.get("doc_date")), "doc_no": d.get("doc_no"),
+            "to": (info.get("to") or {}).get("value"), "from": (info.get("from") or {}).get("value"),
+            "subject": d.get("subject"), "summary": letter_summary(d),
+            "deadline": due, "late": bool(due and due < today), "error": d.get("error"),
+        })
+    return {"project": project, "letters": letters, "today": today,
+            "pending": sum(1 for x in letters if x["status"] in ("queued", "processing"))}
+
+
+def letters_csv(project_id: int | None) -> tuple[str, bytes]:
+    """دفتر نامه‌ها برای اکسل (CSV با BOM تا فارسی درست نمایش داده شود)."""
+    import csv
+    import io
+
+    reg = letters_register(project_id)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["ردیف", "تاریخ", "شماره", "نوع", "گیرنده", "فرستنده", "موضوع", "خلاصه", "مهلت", "فایل"])
+    for i, x in enumerate(sorted(reg["letters"], key=lambda x: (x["date"], x["id"])), 1):
+        w.writerow([i, x["date"], x["doc_no"] or "", CATEGORIES[x["category"]], x["to"] or "", x["from"] or "",
+                    x["subject"] or "", x["summary"], x["deadline"] or "", x["title"]])
+    name = f"نامه‌ها - {(reg['project'] or {}).get('name', 'بدون پروژه')}.csv"
+    return name, ("\ufeff" + buf.getvalue()).encode("utf-8")

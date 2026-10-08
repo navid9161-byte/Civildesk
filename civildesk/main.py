@@ -189,11 +189,13 @@ def documents_list():
 
 
 @app.post("/api/documents", status_code=201)
-def documents_upload(files: list[UploadFile] = File(...), project_id: int | None = Form(None)):
+def documents_upload(files: list[UploadFile] = File(...), project_id: int | None = Form(None),
+                     category: str | None = Form(None)):
     added, errors = [], []
     for f in files:
         try:
-            added.append(documents.add_document(f.file, f.filename or "file", project_id=project_id))
+            added.append(documents.add_document(f.file, f.filename or "file", project_id=project_id,
+                                                category=category or None))
         except db.ValidationError as e:
             errors.append(f"{f.filename}: {e}")
         finally:
@@ -253,6 +255,20 @@ def archive_project(project_id: int):
 def archive_to_invoice(doc_id: int):
     """ثبت صورت‌وضعیت بایگانی‌شده در بخش «صورت‌وضعیت‌ها»."""
     return archive.to_invoice_record(doc_id)
+
+
+@app.get("/api/letters/{project_id}")
+def letters(project_id: int):
+    """دفتر نامه‌های یک پروژه (۰ = بدون پروژه)، با خلاصه‌ی دوخطی هر نامه."""
+    return archive.letters_register(project_id or None)
+
+
+@app.get("/api/letters/{project_id}/export.csv")
+def letters_csv(project_id: int):
+    name, data = archive.letters_csv(project_id or None)
+    from urllib.parse import quote
+    return Response(data, media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
 
 
 class AskIn(BaseModel):
