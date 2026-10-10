@@ -85,9 +85,9 @@ def ocr_available() -> bool:
     return shutil.which("tesseract") is not None and os.getenv("CIVILDESK_NO_OCR") is None
 
 
-def _tesseract(path: str, langs: str) -> str:
+def _tesseract(path: str, langs: str, psm: str = "3") -> str:
     res = subprocess.run(
-        ["tesseract", path, "stdout", "-l", langs, "--psm", "3"],
+        ["tesseract", path, "stdout", "-l", langs, "--psm", psm],
         capture_output=True, text=True, timeout=300,
     )
     if res.returncode != 0:
@@ -182,6 +182,65 @@ def _ocr_pdf_page(page) -> str:
         return ocr_image(tmp.name)
     finally:
         os.unlink(tmp.name)
+
+
+def header_text(path: Path, kind: str) -> str:
+    """OCR جداگانه‌ی بالای صفحه‌ی اول (کادر «شماره / تاریخ / پیوست»).
+
+    در PDFهای اتوماسیون اداری سربرگ و شماره و تاریخ اغلب تصویر است و در متن PDF نیست؛ در اسکن‌ها هم OCR کل
+    صفحه این کادر کوچک را گاهی جا می‌اندازد. اینجا فقط ۳۰٪ بالای صفحه با دو حالت چیدمان خوانده می‌شود.
+    """
+    from PIL import Image
+
+    if kind == "image":
+        img = Image.open(path).convert("L")
+    else:
+        import pymupdf
+
+        with pymupdf.open(path) as pdf:
+            page = pdf[0]
+            longest = max(page.rect.width, page.rect.height) / 72
+            pix = page.get_pixmap(dpi=min(300, int(OCR_MAX_PIXELS / max(longest, 1))), colorspace=pymupdf.csGRAY)
+            img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
+            del pix
+    w, h = img.size
+    crop = img.crop((0, 0, w, int(h * 0.3)))
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        crop.save(tmp.name)
+    try:
+        return "\n".join(textnorm.clean_display(_tesseract(tmp.name, "fas", psm)) for psm in ("11", "6"))
+    finally:
+        os.unlink(tmp.name)
+        del img, crop
+        release_memory()
+
+
+def backfill_headers() -> int:
+    """یک بار برای اسناد قبلی: نامه‌هایی که شماره یا تاریخشان پیدا نشده، سربرگشان جداگانه خوانده و دوباره تحلیل می‌شود."""
+    if not ocr_available():
+        return 0
+    with db.connect() as conn:
+        if db.kv_get(conn, "header_backfill") == "1":
+            return 0
+        rows = conn.execute(
+            "SELECT id, path, kind FROM documents WHERE status='ready' AND kind IN ('pdf','image') "
+            "AND (doc_date IS NULL OR (doc_no IS NULL AND category IN ('letter','order'))) "
+            "AND COALESCE(edited, '') NOT LIKE '%doc_date%' ORDER BY id"
+        ).fetchall()
+    n = 0
+    for r in rows:
+        if worker.stopping:
+            return n
+        try:
+            archive.analyze(r["id"], archive.with_header(archive.head_pages_for(r["id"]), header_text(Path(r["path"]), r["kind"])))
+            n += 1
+        except Exception:
+            log.exception("خواندن سربرگ سند %s ناموفق بود", r["id"])
+    with db.connect() as conn:
+        db.kv_set(conn, "header_backfill", "1")
+    if n:
+        log.info("سربرگ %d سند دوباره خوانده شد", n)
+    return n
 
 
 def read_sheet_page(path: Path, kind: str, page_no: int) -> dict[str, Any] | None:
@@ -533,8 +592,16 @@ def process_document(doc_id: int) -> None:
                     sheets.append({"page": page_no, "title": tables.sheet_title(text), **sheet})
             except Exception:
                 log.exception("خواندن جدول صفحه‌ی %s سند %s ناموفق بود", page_no, doc_id)
+        if page_no == 1 and ocr_available() and d["kind"] in ("pdf", "image") and not archive.labeled_date(text[:3000]):
+            try:  # شماره و تاریخ در متن صفحه پیدا نشد: سربرگ جداگانه از روی تصویر
+                head_pages.extend(archive.with_header([], header_text(Path(d["path"]), d["kind"])))
+            except Exception:
+                log.exception("خواندن سربرگ سند %s ناموفق بود", doc_id)
         if page_no <= archive.ANALYZE_PAGES:
-            head_pages.append((page_no, textnorm.clean_display(text)))
+            if head_pages and head_pages[-1][0] == page_no:  # سربرگ همین صفحه
+                head_pages[-1] = (page_no, head_pages[-1][1] + "\n\n" + textnorm.clean_display(text))
+            else:
+                head_pages.append((page_no, textnorm.clean_display(text)))
         else:  # دو صفحه‌ی آخر هم (برگ خلاصه‌ی صورت‌وضعیت، امضاها) نگه داشته می‌شود
             tail_pages = tail_pages[-1:] + [(page_no, textnorm.clean_display(text))]
         if method in ("ocr", "fixed", "weak"):
@@ -651,6 +718,7 @@ class Worker:
         try:
             archive.upgrade()  # بعد از به‌روزرسانی برنامه: تحلیل دوباره (و خواندن دوباره‌ی اسناد خراب)
             archive.analyze_pending()  # اسنادی که هنوز تحلیل نشده‌اند
+            backfill_headers()  # نامه‌های قبلی بی‌شماره/بی‌تاریخ
         except Exception:
             log.exception("تحلیل اسناد قدیمی ناموفق بود")
         embedder.get_model()  # بارگذاری مدل در پس‌زمینه
