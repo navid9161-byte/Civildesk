@@ -1,4 +1,8 @@
 import io
+import os
+import shutil
+
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -302,3 +306,51 @@ def test_letters_api():
     r = client.get(f"/api/letters/{p['id']}/export.csv")
     assert r.status_code == 200 and "text/csv" in r.headers["content-type"]
     assert client.post("/api/documents", files={"files": ("x.txt", b"x")}, data={"category": "bad"}).status_code == 400
+
+
+def test_letter_number_and_date_variants():
+    p = archive._prep
+    # مقدار قبل از برچسب (ترتیب برعکس در OCR) و برچسب بدخوانده‌شده
+    assert archive.labeled_date(p("۱۴۰۵/۰۷/۱۸ :تاریخ\nشماره: ۱۴۰۵/۱۵۵۳")) [1] == "1405/07/18"
+    assert archive.labeled_date(p("تارخ : ۱۴۰۵/۰۷/۱۸"))[1] == "1405/07/18"
+    assert archive.labeled_date(p("تاریخ: ۸۱/۷۰/۵۰۴۱"))[1] == "1405/07/18"  # رقم‌های برعکس
+    assert archive.labeled_number(p("۱۴۰۵/۱۵۵۳ :شماره"), True)[1] == "1405/1553"
+    assert archive.labeled_number(p("شماره تماس: ۰۹۱۲۳۴۵۶۷۸۹"), True) is None
+    # تاریخ‌هایی که به نامه‌ی دیگر یا مهلت اشاره دارند تاریخ نامه نیستند
+    info = archive.extract(p("احتراماً، عطف به نامه‌ی مورخ ۱۴۰۵/۰۲/۲۳ و تا تاریخ ۱۴۰۵/۰۸/۰۱ ...\nبا تشکر ۱۴۰۵/۰۷/۱۴"), "letter")
+    assert info["doc_date"]["value"] == "1405/07/14"
+
+
+FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+
+@pytest.mark.skipif(shutil.which("tesseract") is None or not os.path.exists(FONT), reason="Tesseract یا قلم DejaVu نصب نیست")
+def test_header_image_in_text_pdf():
+    """PDF اتوماسیون: متن نامه سالم ولی شماره و تاریخ تصویر است؛ سربرگ جداگانه OCR می‌شود."""
+    from tests.fixtures.automation_letter import build
+
+    p = _project()
+    d = documents.add_document(io.BytesIO(build()), "معرفی نماینده.pdf", project_id=p["id"], category="letter")
+    documents.worker.run_pending()
+    doc = documents.get_document(d["id"])
+    assert doc["ocr_pages"] == 0  # متن خود نامه از لایه‌ی متنی خوانده شد
+    assert doc["doc_date"] == "1405/07/14" and doc["doc_no"] == "1405/1553"
+    x = archive.letters_register(p["id"])["letters"][0]
+    assert x["dated"] and "خواهشمند است" in x["summary"] and "سربرگ" not in x["summary"]
+
+
+@pytest.mark.skipif(shutil.which("tesseract") is None or not os.path.exists(FONT), reason="Tesseract یا قلم DejaVu نصب نیست")
+def test_header_backfill_for_old_letters():
+    from civildesk import db
+    from tests.fixtures.automation_letter import build
+
+    p = _project()
+    d = documents.add_document(io.BytesIO(build("1405/1600", "1405/07/20")), "old.pdf", project_id=p["id"], category="letter")
+    documents.worker.run_pending()
+    with db.connect() as conn:  # مثل نامه‌ای که با نسخه‌ی قبلی خوانده شده بود
+        conn.execute("UPDATE documents SET doc_date=NULL, doc_no=NULL, head_text=NULL WHERE id=?", (d["id"],))
+        conn.execute("DELETE FROM kv WHERE key='header_backfill'")
+    assert documents.backfill_headers() == 1
+    doc = documents.get_document(d["id"])
+    assert doc["doc_date"] == "1405/07/20" and doc["doc_no"] == "1405/1600"
+    assert documents.backfill_headers() == 0  # فقط یک بار

@@ -85,7 +85,12 @@ def _count(norm: str, word: str) -> int:
 SP = r"[\s‌]*"
 _DATE = r"(1[34]\d\d)\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{1,2})"
 _DATE_REV = r"(\d{1,2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(1[34]\d\d)"  # گاهی در PDF فارسی برعکس می‌آید
-_DATE_RE = re.compile(rf"(?<!\d){_DATE}(?!\d)|(?<!\d){_DATE_REV}(?!\d)")
+_DATE_MIR = r"(\d{1,2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{2}[34]1)"  # «81/70/5041»: رقم‌های 1405/07/18 برعکس
+_DATE_RE = re.compile(rf"(?<!\d){_DATE}(?!\d)|(?<!\d){_DATE_REV}(?!\d)|(?<!\d){_DATE_MIR}(?!\d)")
+LBL_DATE = r"(?:تاریخ|تارخ|ناریخ|تاربخ|تاریح|تاریج|تاريخ)"
+LBL_NO = r"(?:شماره|شعاره|سماره|شیماره|شماوه)"
+_NOT_DOC_DATE = re.compile(r"(?:مورخ|مورّخ|تا\s*تاریخ|لغایت|الی|از\s*تاریخ|مهلت|به\s*تاریخ|ابلاغ\s*شده)[\s:]*$")
+_NOT_DOC_NO = r"(?!\s*(?:تماس|حساب|ملی|ثبت|پلاک|تلفن|همراه|کارت|شبا|اقتصادی|شناسنامه|پرونده|فکس|نمابر|قرارداد|پیمان))"
 
 
 def _mkdate(y: str, m: str, d: str) -> str | None:
@@ -99,7 +104,36 @@ def _mkdate(y: str, m: str, d: str) -> str | None:
 def _date_from_match(m: re.Match) -> str | None:
     if m.group(1):
         return _mkdate(m.group(1), m.group(2), m.group(3))
-    return _mkdate(m.group(6), m.group(5), m.group(4))
+    if m.group(4):
+        return _mkdate(m.group(6), m.group(5), m.group(4))
+    return _mkdate(m.group(9)[::-1], m.group(8)[::-1], m.group(7)[::-1])
+
+
+def labeled_date(text: str) -> tuple[int, str] | None:
+    """تاریخ کنار برچسب «تاریخ:» (بعد یا قبل از آن، چون OCR گاهی ترتیب را برعکس می‌کند)."""
+    for m in re.finditer(r"(?<!تا )(?<!از )(?<!به )" + LBL_DATE + SP + r"(?:نامه|جلسه|صدور|ثبت)?\s*[:.]?", text):
+        dm = _DATE_RE.search(text[m.end(): m.end() + 45])
+        if dm and (d := _date_from_match(dm)):
+            return m.start(), d
+        before = list(_DATE_RE.finditer(text[max(0, m.start() - 28): m.start()]))
+        if before and (d := _date_from_match(before[-1])):
+            return m.start(), d
+    return None
+
+
+def labeled_number(text: str, letter: bool) -> tuple[int, str] | None:
+    """شماره‌ی نامه/سند کنار برچسب «شماره:» (بعد یا قبل از آن)."""
+    extra = r"(?:نامه|ثبت\s*دبیرخانه)?" if letter else r"(?:نامه|قرارداد|پیمان|صورتجلسه)?"
+    value = r"([0-9][\w/\-.]{0,24}(?:\s*/\s*[\w\-.]{1,12}){0,3})"
+    for m in re.finditer(LBL_NO + SP + extra + _NOT_DOC_NO + r"\s*[:.]?\s*", text):
+        for vm in (re.match(value, text[m.end(): m.end() + 40]),
+                   re.search(value + r"[\s:]*$", text[max(0, m.start() - 34): m.start()])):
+            if not vm:
+                continue
+            v = re.sub(r"\s+", "", vm.group(1)).strip("/.-")
+            if sum(c.isdigit() for c in v) >= 3 and not _DATE_RE.fullmatch(v):
+                return m.start(), v
+    return None
 
 
 def _dates(text: str) -> list[tuple[int, str]]:
@@ -441,17 +475,15 @@ def extract(text: str, category: str) -> dict[str, Any]:
     flat = text.replace("\n", " ")  # هم‌طول با text
     head = text[:900]
 
-    # شماره و تاریخ سند
-    m = re.search(
-        r"شماره" + SP + r"(?:نامه|قرارداد|پیمان|صورتجلسه)?\s*[:.]?\s*"
-        r"([0-9][\w/\-.]{0,24}(?:\s*/\s*[\w\-.]{1,12}){0,3})", head)
-    if m:
-        info["doc_no"] = {"pos": m.start(), "value": re.sub(r"\s+", "", m.group(1)).strip("/.-")}
-    dm = _date_after(head, r"(?<!تا )(?<!از )تاریخ" + SP + r"(?:نامه|قرارداد|جلسه)?", 40)
+    # شماره و تاریخ سند: کادر سربرگ ممکن است در متن OCR جلوتر یا عقب‌تر بیاید، پس بخش بزرگ‌تری جست‌وجو می‌شود
+    top = text[:3000]
+    nm = labeled_number(top, category in ("letter", "order"))
+    if nm:
+        info["doc_no"] = {"pos": nm[0], "value": nm[1]}
+    dm = labeled_date(top)
     guessed = not dm
-    if not dm:
-        ds = _dates(head)
-        dm = ds[0] if ds else None
+    if not dm:  # تاریخ بی‌برچسب: اولین تاریخی که به نامه‌ی دیگر یا مهلت اشاره نمی‌کند
+        dm = next(((p, d) for p, d in _dates(top) if not _NOT_DOC_DATE.search(top[max(0, p - 16): p])), None)
     if dm:
         info["doc_date"] = {"pos": dm[0], "value": dm[1], "guessed": guessed}
 
@@ -1089,3 +1121,26 @@ def letters_csv(project_id: int | None) -> tuple[str, bytes]:
                     x["subject"] or "", x["summary"], x["deadline"] or "", x["title"]])
     name = f"نامه‌ها - {(reg['project'] or {}).get('name', 'بدون پروژه')}.csv"
     return name, ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+
+def head_pages_for(doc_id: int) -> list[tuple[int, str]]:
+    """متن صفحه‌های اول یک سند (ذخیره‌شده، یا از بندهای نمایه‌شده برای اسناد قدیمی)."""
+    with db.connect() as conn:
+        row = conn.execute("SELECT head_text FROM documents WHERE id = ?", (doc_id,)).fetchone()
+        if row and row["head_text"]:
+            return [tuple(x) for x in json.loads(row["head_text"])]
+        pages: dict[int, list[str]] = {}
+        for r in conn.execute("SELECT page, text FROM doc_chunks WHERE doc_id = ? AND page <= ? ORDER BY page, seq",
+                              (doc_id, ANALYZE_PAGES)):
+            pages.setdefault(r["page"], []).append(r["text"])
+    return [(p, "\n".join(t)) for p, t in sorted(pages.items())]
+
+
+def with_header(pages: list[tuple[int, str]], header: str) -> list[tuple[int, str]]:
+    """افزودن متن سربرگ (OCR جداگانه‌ی بالای صفحه‌ی اول) به ابتدای صفحه‌ی اول."""
+    header = header.strip()
+    if not header:
+        return pages
+    if pages and pages[0][0] == 1:
+        return [(1, f"سربرگ:\n{header}\n\n{pages[0][1]}")] + list(pages[1:])
+    return [(1, f"سربرگ:\n{header}")] + list(pages)
