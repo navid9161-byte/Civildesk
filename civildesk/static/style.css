@@ -354,11 +354,15 @@ dialog h3 {
 .src-actions .btn { font-size: 13px; padding: 5px 12px; }
 mark { background: #fbe3a6; color: inherit; border-radius: 4px; padding: 0 2px; }
 @media (prefers-color-scheme: dark) { mark { background: #6b5118; } }
-.pageview { width: min(1000px, 96vw); max-height: 94vh; }
-.pv-bar { display: flex; gap: 8px; align-items: center; padding: 10px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--card); }
-.pv-bar b { flex: 1; text-align: center; }
-.pv-body { overflow: auto; max-height: calc(94vh - 62px); background: #fff; }
-.pv-body img { display: block; width: 100%; height: auto; }
+/* نمایش صفحه: پیش‌فرض کل صفحه در یک نگاه (بدون اسکرول)؛ کلیک = بزرگ‌نمایی */
+.pageview { width: auto; max-width: 96vw; max-height: 96vh; }
+.pv-bar { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--card); z-index: 1; }
+.pv-bar b { flex: 1; text-align: center; white-space: nowrap; }
+.pv-body { overflow: auto; max-height: calc(96vh - 56px); background: #fff; }
+.pv-body img { display: block; margin: 0 auto; max-height: calc(96vh - 58px); max-width: 96vw; width: auto; height: auto; cursor: zoom-in; }
+.pageview.zoom { width: min(1100px, 96vw); }
+.pageview.zoom .pv-body img { max-height: none; width: 100%; max-width: none; cursor: zoom-out; }
+@media (max-width: 640px) { .pv-bar .btn { padding: 6px 8px; font-size: 12.5px; } }
 
 /* ───────── بایگانی پروژه‌ها ───────── */
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
