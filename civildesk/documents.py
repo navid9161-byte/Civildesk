@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 os.environ.setdefault("OMP_THREAD_LIMIT", "1")
 MAX_ATTEMPTS = 3  # اگر پردازش یک صفحه این‌قدر بار نیمه‌کاره ماند (مثلاً کمبود حافظه)، آن صفحه رد می‌شود
 MAX_SHEET_PAGES = 6
+HEADER_BACKFILL = "2"  # با تغییر آن، سربرگ نامه‌های قبلی یک بار دیگر خوانده می‌شود
 
 
 def release_memory() -> None:
@@ -205,13 +206,20 @@ def header_text(path: Path, kind: str) -> str:
             del pix
     w, h = img.size
     crop = img.crop((0, 0, w, int(h * 0.3)))
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        crop.save(tmp.name)
+    big = crop.resize((crop.width * 2, crop.height * 2), Image.BICUBIC)  # رقم‌های ریز روی نقطه‌چین
+    paths = []
     try:
-        return "\n".join(textnorm.clean_display(_tesseract(tmp.name, "fas", psm)) for psm in ("11", "6"))
+        for im in (crop, big):
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                im.save(tmp.name)
+                paths.append(tmp.name)
+        # چند خوانش متفاوت؛ شماره و تاریخ بعداً با رأی‌گیری بین آن‌ها انتخاب می‌شود
+        passes = [(paths[0], "11"), (paths[0], "6"), (paths[1], "11")]
+        return "\n".join(textnorm.clean_display(_tesseract(p, "fas", psm)) for p, psm in passes)
     finally:
-        os.unlink(tmp.name)
-        del img, crop
+        for p in paths:
+            os.unlink(p)
+        del img, crop, big
         release_memory()
 
 
@@ -220,11 +228,11 @@ def backfill_headers() -> int:
     if not ocr_available():
         return 0
     with db.connect() as conn:
-        if db.kv_get(conn, "header_backfill") == "1":
+        if db.kv_get(conn, "header_backfill") == HEADER_BACKFILL:
             return 0
         rows = conn.execute(
             "SELECT id, path, kind FROM documents WHERE status='ready' AND kind IN ('pdf','image') "
-            "AND (doc_date IS NULL OR (doc_no IS NULL AND category IN ('letter','order'))) "
+            "AND (doc_date IS NULL OR category IN ('letter','order')) "
             "AND COALESCE(edited, '') NOT LIKE '%doc_date%' ORDER BY id"
         ).fetchall()
     n = 0
@@ -237,7 +245,7 @@ def backfill_headers() -> int:
         except Exception:
             log.exception("خواندن سربرگ سند %s ناموفق بود", r["id"])
     with db.connect() as conn:
-        db.kv_set(conn, "header_backfill", "1")
+        db.kv_set(conn, "header_backfill", HEADER_BACKFILL)
     if n:
         log.info("سربرگ %d سند دوباره خوانده شد", n)
     return n

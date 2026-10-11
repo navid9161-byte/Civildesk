@@ -354,3 +354,35 @@ def test_header_backfill_for_old_letters():
     doc = documents.get_document(d["id"])
     assert doc["doc_date"] == "1405/07/20" and doc["doc_no"] == "1405/1600"
     assert documents.backfill_headers() == 0  # فقط یک بار
+
+
+# خوانش‌های واقعی OCR از کادر نقطه‌چین «شماره / تاریخ» (هر خوانش اشتباه متفاوتی دارد)
+HEADER_PASSES = """شماره : ۰۰۸ ۱۴۰۵/۱۲۸۷/ص
+تاریخ : ۱۴۰۵/۶۷/۵۵۰
+شرکت محور گستر نصر شماره : ۱۴۰۵/۱۲۸۷۰......۰/ص........
+تاریخ : ...۱۳۰۵/۰۷/۰۵
+شماره ۰۰.۰۰۰ ۱۴۰۵/۱۲۸۷ اص
+تاریخ : ۱۴۰۵/۰/۰۵"""
+
+
+def test_header_votes_across_ocr_passes():
+    pages = archive.with_header([(1, "جناب آقای مهندس ابراهیمی\nبا سلام\nمتن نامه")], HEADER_PASSES)
+    text = archive._prep(pages[0][1])
+    info = archive.extract(text, "letter")
+    assert info["doc_no"]["value"] == "1405/1287/ص"  # نه «۰۰۸» یا «۱۲۸۷۰»
+    assert info["doc_date"]["value"] == "1405/07/05"  # سال/ماه/روز جداگانه رأی‌گیری شد
+    # خواندن دوباره‌ی سربرگ، سربرگ قبلی را جایگزین می‌کند نه اینکه اضافه شود
+    again = archive.with_header(pages, "شماره : ۱۴۰۵/۹۹۹/ص")
+    assert again[0][1].count(archive.HEADER_START) == 1 and "۱۲۸۷" not in again[0][1]
+    assert archive.strip_header(again[0][1]).startswith("جناب آقای")
+
+
+def test_letter_subject_without_label_and_contract_number():
+    text = archive._prep("""سرکار خانم مهندس بیک زند
+مدیر عامل محترم شرکت توسعه نفت و گاز مهران
+معرفی نماینده تام الاختیار این شرکت جهت تحویل اوراق بانکی و همکاری های مالی
+با سلام و دعای خیر
+احتراماً، به استناد قرارداد شماره ۰۷۳-۱۴۰۴-م ت ن آقای کامیابی فرد معرفی می‌گردد. لطفاً دستور همکاری لازم را صادر فرمایید.""")
+    info = archive.extract(text, "letter")
+    assert info["subject"]["value"].startswith("معرفی نماینده تام الاختیار")
+    assert "doc_no" not in info  # شماره‌ی قرارداد در متن، شماره‌ی نامه نیست

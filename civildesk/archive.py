@@ -109,8 +109,98 @@ def _date_from_match(m: re.Match) -> str | None:
     return _mkdate(m.group(9)[::-1], m.group(8)[::-1], m.group(7)[::-1])
 
 
+HEADER_START, HEADER_END = "سربرگ:\n", "\n[پایان سربرگ]"
+# شماره‌ی نامه‌های اداری: «۱۴۰۵/۱۲۸۷/ص» (سال/ردیف/حرف)؛ «/» در OCR گاهی «ا» یا «|» خوانده می‌شود
+_LETTER_NO = re.compile(r"(?<!\d)(1[34]\d\d)\s*[/ا|\\]\s*(\d{2,6})(?!\d)(?:\s*[/ا|\\]?\s*([آ-ی])(?![آ-ی]))?")
+_DATE_LOOSE = re.compile(r"(?<!\d)(1[34]\d\d)\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{1,2})")  # رقم اضافه‌ی بعدش (نقطه‌چین) مهم نیست
+
+
+def header_block(text: str) -> str | None:
+    """متن سربرگ (OCR جداگانه‌ی بالای صفحه‌ی اول) اگر در ابتدای متن آمده باشد."""
+    if not text.startswith(HEADER_START):
+        return None
+    end = text.find(HEADER_END)
+    return text[len(HEADER_START): end if end != -1 else min(len(text), 2500)]
+
+
+def _vote(cands: list[tuple[int, str]]) -> tuple[int, str] | None:
+    """رأی‌گیری بین خوانش‌های مختلف سربرگ: پرتکرارترین مقدار (هر خوانش اشتباه متفاوتی دارد)."""
+    if not cands:
+        return None
+    counts: dict[str, int] = {}
+    for _, v in cands:
+        counts[v] = counts.get(v, 0) + 1
+    best = max(counts.values())
+    return next((p, v) for p, v in cands if counts[v] == best)
+
+
+def _year_ok(y: int) -> bool:
+    cy = int(db.today_str()[:4])
+    return cy - 40 <= y <= cy + 1
+
+
+def _header_votes(block: str) -> tuple[tuple[int, str] | None, tuple[int, str] | None]:
+    """شماره و تاریخ از چند خوانش سربرگ، با رأی‌گیری.
+
+    خطاهای رایج OCR در کادر نقطه‌چین: صفرهای نقطه‌چین که به انتهای عدد می‌چسبند («۱۲۸۷۰......»)،
+    سال نامعقول («۱۴۵۵»)، و ماه/روز خراب. برای تاریخ، اگر هیچ خوانشی کامل درست نبود، سال و ماه و روز
+    جداگانه رأی‌گیری می‌شوند (و سالِ شماره‌ی نامه هم یک رأی برای سال است).
+    """
+    nos: list[tuple[int, int, str, str]] = []  # (جا، سال، ردیف، حرف)
+    for m in re.finditer(LBL_NO, block):
+        win = block[m.end(): m.end() + 50]
+        nm = _LETTER_NO.search(win)
+        if not nm or (len(nm.group(2)) <= 2 and re.match(r"\s*[/\-.]\s*\d", win[nm.end(2):])):
+            continue  # «۱۴۰۵/۰۷/…» تاریخ است نه شماره
+        seq = nm.group(2)
+        if win[nm.end(2): nm.end(2) + 1] == "." and seq.rstrip("0") and len(seq.rstrip("0")) >= 2:
+            seq = seq.rstrip("0")  # صفرهایی که از نقطه‌چین چسبیده‌اند
+        if _year_ok(int(nm.group(1))):
+            nos.append((m.start(), int(nm.group(1)), seq, nm.group(3) or ""))
+    number = None
+    if nos:
+        votes: dict[tuple[int, str], int] = {}
+        for _, y, q, _ in nos:
+            votes[(y, q)] = votes.get((y, q), 0) + 1
+        for (y, q), n in list(votes.items()):  # «۱۲۸۷۰» هم رأی «۱۲۸۷» است
+            for (y2, q2) in votes:
+                if y2 == y and q != q2 and q.startswith(q2) and set(q[len(q2):]) == {"0"}:
+                    votes[(y2, q2)] += n
+        (y, q) = max(votes, key=lambda k: (votes[k], -len(k[1])))
+        suffix = max((x[3] for x in nos if x[1] == y and x[2].startswith(q) and x[3]), key=lambda c: sum(
+            1 for x in nos if x[3] == c), default="")
+        pos = next(x[0] for x in nos if x[1] == y and x[2].startswith(q))
+        number = (pos, f"{y}/{q}" + (f"/{suffix}" if suffix else ""))
+
+    full, parts, first = [], [], None
+    for m in re.finditer(r"(?<!تا )(?<!از )(?<!به )" + LBL_DATE, block):
+        dm = re.search(r"(?<!\d)(1[34]\d\d)\s*[/\-.]\s*(\d{1,3})\s*[/\-.]\s*(\d{1,4})", block[m.end(): m.end() + 50])
+        if not dm:
+            continue
+        first = first if first is not None else m.start()
+        y, mo, d = dm.group(1), dm.group(2)[:2], dm.group(3)[:2]
+        parts.append((y, mo, d))
+        if _year_ok(int(y)) and (date := _mkdate(y, mo, d)):
+            full.append((m.start(), date))
+    date = _vote(full)
+    if date is None and parts:
+        def pick(vals: list[str], ok) -> str | None:
+            vals = [v for v in vals if ok(v)]
+            return max(vals, key=vals.count) if vals else None
+        years = [p[0] for p in parts] + ([str(number[1][:4])] if number else [])
+        y = pick(years, lambda v: _year_ok(int(v)))
+        mo = pick([p[1] for p in parts], lambda v: 1 <= int(v) <= 12)
+        d = pick([p[2] for p in parts], lambda v: 1 <= int(v) <= 31)
+        if y and mo and d and (val := _mkdate(y, mo, d)):
+            date = (first, val)
+    return number, date
+
+
 def labeled_date(text: str) -> tuple[int, str] | None:
     """تاریخ کنار برچسب «تاریخ:» (بعد یا قبل از آن، چون OCR گاهی ترتیب را برعکس می‌کند)."""
+    block = header_block(text)
+    if block and (voted := _header_votes(block)[1]):
+        return voted
     for m in re.finditer(r"(?<!تا )(?<!از )(?<!به )" + LBL_DATE + SP + r"(?:نامه|جلسه|صدور|ثبت)?\s*[:.]?", text):
         dm = _DATE_RE.search(text[m.end(): m.end() + 45])
         if dm and (d := _date_from_match(dm)):
@@ -123,15 +213,21 @@ def labeled_date(text: str) -> tuple[int, str] | None:
 
 def labeled_number(text: str, letter: bool) -> tuple[int, str] | None:
     """شماره‌ی نامه/سند کنار برچسب «شماره:» (بعد یا قبل از آن)."""
+    block = header_block(text)
+    if block and (voted := _header_votes(block)[0]):
+        return voted
     extra = r"(?:نامه|ثبت\s*دبیرخانه)?" if letter else r"(?:نامه|قرارداد|پیمان|صورتجلسه)?"
     value = r"([0-9][\w/\-.]{0,24}(?:\s*/\s*[\w\-.]{1,12}){0,3})"
     for m in re.finditer(LBL_NO + SP + extra + _NOT_DOC_NO + r"\s*[:.]?\s*", text):
+        if re.search(r"(?:قرارداد|پیمان|وضعیت|صورتجلسه|پلاک|ثبت)\s*$", text[max(0, m.start() - 16): m.start()]):
+            continue  # «قرارداد شماره …» شماره‌ی نامه نیست
         for vm in (re.match(value, text[m.end(): m.end() + 40]),
                    re.search(value + r"[\s:]*$", text[max(0, m.start() - 34): m.start()])):
             if not vm:
                 continue
             v = re.sub(r"\s+", "", vm.group(1)).strip("/.-")
-            if sum(c.isdigit() for c in v) >= 3 and not _DATE_RE.fullmatch(v):
+            # «۰۰۰۰»، «۰۰۸»: نقطه‌چین کادر سربرگ که صفر خوانده شده
+            if sum(c.isdigit() and c != "0" for c in v) >= 2 and sum(c.isdigit() for c in v) >= 3 and not _DATE_RE.fullmatch(v):
                 return m.start(), v
     return None
 
@@ -488,9 +584,21 @@ def extract(text: str, category: str) -> dict[str, Any]:
         info["doc_date"] = {"pos": dm[0], "value": dm[1], "guessed": guessed}
 
     # موضوع
-    sub = _line_after(text[:2500], r"موضوع" + SP + r"(?:قرارداد|پیمان|جلسه|نامه)?\s*(?:عبارت\s+است\s+از)?")
+    body_top = strip_header(text)
+    off = len(text) - len(body_top)
+    sub = _line_after(body_top[:2500], r"موضوع" + SP + r"(?:قرارداد|پیمان|جلسه|نامه)?\s*(?:عبارت\s+است\s+از)?")
     if sub:
-        info["subject"] = {"pos": sub[0], "value": sub[1]}
+        info["subject"] = {"pos": sub[0] + off, "value": sub[1]}
+    elif category in ("letter", "order"):
+        # نامه‌ی بی‌برچسب «موضوع»: سطر پررنگ قبل از «با سلام» (بعد از نام و سمت گیرنده)
+        sm0 = re.search(r"(?m)^\s*(?:با\s+سلام|سلام\s+علیکم|با\s+اهدای\s+سلام)", body_top[:2500])
+        if sm0:
+            prev = [ln.strip() for ln in body_top[:sm0.start()].split("\n") if ln.strip()]
+            if prev:
+                cand = prev[-1]
+                words = cand.split()
+                if 3 <= len(words) <= 25 and not re.search(r"محترم|جناب|سرکار|ریاست|مدیریت|مدیرعامل|مدیر\s*عامل", cand):
+                    info["subject"] = {"pos": off + body_top.rfind(cand, 0, sm0.start()), "value": cand.strip(" :.-")[:160]}
 
     # گیرنده و فرستنده‌ی نامه
     rm = re.search(r"(?m)^\s*((?:جناب|سرکار|ریاست\s+محترم|مدیر\s*عامل\s+محترم|مدیریت\s+محترم|اداره\s+کل)[^\n]{3,120})",
@@ -1138,9 +1246,23 @@ def head_pages_for(doc_id: int) -> list[tuple[int, str]]:
 
 def with_header(pages: list[tuple[int, str]], header: str) -> list[tuple[int, str]]:
     """افزودن متن سربرگ (OCR جداگانه‌ی بالای صفحه‌ی اول) به ابتدای صفحه‌ی اول."""
+    pages = [(p, strip_header(t) if p == 1 else t) for p, t in pages]
     header = header.strip()
     if not header:
         return pages
+    block = f"{HEADER_START}{header}{HEADER_END}"
     if pages and pages[0][0] == 1:
-        return [(1, f"سربرگ:\n{header}\n\n{pages[0][1]}")] + list(pages[1:])
-    return [(1, f"سربرگ:\n{header}")] + list(pages)
+        return [(1, f"{block}\n\n{pages[0][1]}")] + list(pages[1:])
+    return [(1, block)] + list(pages)
+
+
+def strip_header(text: str) -> str:
+    """حذف سربرگ قبلی (برای خواندن دوباره‌ی آن)؛ سربرگ‌های نسخه‌ی قبل علامت پایان نداشتند."""
+    if not text.startswith(HEADER_START):
+        return text
+    end = text.find(HEADER_END)
+    if end != -1:
+        return text[end + len(HEADER_END):].lstrip("\n")
+    rest = text[len(HEADER_START):]
+    i = rest.find("\n\n")
+    return rest[i + 2:] if i != -1 else ""

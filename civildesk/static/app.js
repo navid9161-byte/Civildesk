@@ -682,7 +682,15 @@ function showPage(docId, page, kind) {
   $("#pv-next").onclick = () => set(page + 1);
   $("#pv-prev").hidden = $("#pv-next").hidden = kind !== "pdf";
   $("#pv-close").onclick = () => dlg.close();
+  const zoom = () => dlg.classList.toggle("zoom");
+  $("#pv-zoom").onclick = zoom;
+  img.onclick = zoom;
+  dlg.onkeydown = (e) => {
+    if (e.key === "ArrowLeft" && kind === "pdf") set(page + 1);
+    if (e.key === "ArrowRight" && page > 1) set(page - 1);
+  };
   img.onerror = () => { if (page > 1) set(page - 1); };
+  dlg.classList.remove("zoom");  // پیش‌فرض: کل صفحه دیده شود
   set(page);
   dlg.showModal();
 }
