@@ -6,7 +6,7 @@ import pytest
 
 from fastapi.testclient import TestClient
 
-from civildesk import archive, db, documents
+from civildesk import archive, db, documents, story
 from civildesk.main import app
 
 LETTER = """شماره: ۱۴۰۳/ص/۲۴۵
@@ -439,3 +439,24 @@ def test_word_pdf_text_is_repaired_not_ocred():
     assert v["subject"].startswith("ارسال گزارش هفتگی منتهی به 10 مهر ماه 1405")
     summary = archive.letter_summary({"info": info})
     assert "شایان توجه است که به دلیل کمبود نقدینگی" in summary
+
+
+def test_monthly_report_helpers():
+    assert archive.month_end(1403, 12) == "1403/12/30" and archive.month_end(1404, 12) == "1404/12/29"
+    assert archive.month_end(1405, 6) == "1405/06/31" and archive.month_end(1405, 7) == "1405/07/30"
+    # «شماره قرارداد» در سربرگ، سند را قرارداد نمی‌کند؛ اولین عنوان (گزارش) تعیین‌کننده است
+    assert archive.classify("x.pdf", "شماره قرارداد: 1404-073\nگزارش ماهیانه منتهی به شهریور 1405", "pdf", 30) == "report"
+    # کد سند به‌جای شماره‌ی قرارداد
+    assert archive.doc_code("شماره قرارداد 1404-073-م\nCHGL-MG-INV-C-006\nEPC")[1] == "CHGL-MG-INV-C-006"
+    assert archive.report_period("نمودار پیشرفت\nمرداد 1404\nشهریور 1404\nمرداد 1404\nگزارش ماهیانه منتهی به مهر ماه 1405")[1:] == (
+        "مهر 1405", "1405/07/30")
+
+
+def test_monthly_report_story_sentence():
+    d = {"title": "m.pdf", "category": "report", "doc_no": "ABC-XY-MR-007",
+         "info": {"period": {"value": "مهر 1405"}, "done": {"value": ["تجهیز کارگاه", "برگزاری کلاس ایمنی"]},
+                  "problems": {"value": ["کمبود ماشین آلات"]}, "next": {"value": ["اجرای ابنیه بازه 2 (ادامه)"]},
+                  "manpower": {"value": 2400, "avg": 80}}}
+    s = story.event_core(d)
+    assert s.startswith("گزارش ماهانه‌ی مهر 1405 (شماره‌ی ABC-XY-MR-007) تهیه شد؛ در این ماه تجهیز کارگاه و برگزاری کلاس ایمنی")
+    assert "2,400 نفر-روز" in s and "«کمبود ماشین آلات»" in s and "برای ماه بعد اجرای ابنیه بازه 2 (ادامه)" in s

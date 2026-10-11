@@ -321,11 +321,6 @@ def parse_sheet(cells: list[dict], gray: np.ndarray | None = None) -> dict[str, 
             if _role(x["text"]):
                 cols[x["c0"]] = cols.get(x["c0"], 0) + 1
         role_col = max(cols, key=cols.get) if cols else None
-    # ستون مبلغ گروه‌هایی که زیرسرستون نداشتند: ستونی از گروه که بیشترین عدد بزرگ را دارد
-    for key, (c0, c1, _) in groups.items():
-        if amount_col[key] == -1:
-            counts = {c: sum(1 for x in data if x["c0"] == c and len(re.sub(r"\D", "", _n(x["text"]))) >= 6) for c in range(c0, c1 + 1)}
-            amount_col[key] = max(counts, key=counts.get)
     if label_col is None:  # ستونی (غیر از ارکان) که بیشترین سلول متنی فارسی را دارد
         counts = {}
         for x in data:
@@ -353,13 +348,60 @@ def parse_sheet(cells: list[dict], gray: np.ndarray | None = None) -> dict[str, 
             cache[id(x)] = (val, conf)
         return cache[id(x)]
 
+
+    kinds: dict[int, str] = {}
+
+    def cell_kind(x: dict) -> str:
+        """«amt» مبلغ (≥ ۱ میلیون)، «pct» درصد، «other»."""
+        if id(x) not in kinds:
+            t = _n(x["text"])
+            kind = "pct" if ("%" in t or "٪" in t) else "other"
+            if kind == "other" and gray is not None and digits.available() and (crop := _crop(gray, x)) is not None:
+                read = digits.read_number(crop)
+                if "%" in read:
+                    kind = "pct"
+                elif (v := parse_amount(read)) is not None and v >= 1_000_000:
+                    kind = "amt"
+            if kind == "other" and (v := parse_amount(t.replace(" ", ""))) is not None and v >= 1_000_000:
+                kind = "amt"
+            kinds[id(x)] = kind
+        return kinds[id(x)]
+
+    # ستون مبلغ هر گروه: ستونی که بیشترین مبلغ را دارد (زیرسرستون «مبلغ (ریال)» ممکن است بد خوانده شده باشد
+    # و ستون درصد کنارش جای آن انتخاب شود)
+    big: dict[int, int] = {}
+    mags: dict[int, list[int]] = {}
+    for x in data:
+        if x["c1"] - x["c0"] <= 3 and x["c0"] not in (role_col, label_col) and cell_kind(x) == "amt":
+            big[x["c0"]] = big.get(x["c0"], 0) + 1
+            v, _ = amount(x)
+            if v:
+                mags.setdefault(x["c0"], []).append(len(str(v)))
+
+    def strength(c: int) -> tuple:
+        # مبالغ واقعی صدها میلیارد ریال‌اند؛ درصدی که «٪»اش خوانده نشده عددی کوچک می‌شود
+        m = sorted(mags.get(c, []))
+        return (m[len(m) // 2] if m else 0, big.get(c, 0))
+
+    for key, (c0, c1, _) in groups.items():
+        best = max(range(c0, c1 + 1), key=strength)
+        if amount_col[key] == -1 or strength(amount_col[key]) < strength(best):
+            amount_col[key] = best
+    if "period" not in amount_col and "prev" in amount_col and "total" in amount_col:
+        # سرستون «طی دوره» خوانده نشد: ستون مبالغِ بین «تا دوره قبل» و «تاکنون»
+        lo, hi = sorted((amount_col["prev"], amount_col["total"]))
+        cands = [c for c in range(lo + 1, hi) if big.get(c, 0) and c not in amount_col.values()]
+        if cands:
+            amount_col["period"] = max(cands, key=strength)
+            groups["period"] = (amount_col["period"], amount_col["period"], head_r1)
+
     rows, sections = [], []
     for r in range(head_r1 + 1, nrows + 1):
         lab = _covering(data, r, label_col) if label_col is not None else None
         rc = _covering(data, r, role_col) if role_col is not None else None
         label = " ".join(_n(lab["text"]).split()).strip(" \"'.،:-|") if lab else ""
         role = _role(rc["text"]) if rc else None
-        is_sum = any("جمع" in _n(x["text"]) for x in data if x["r0"] <= r <= x["r1"] and x["r1"] - x["r0"] < 2)
+        is_sum = "جمع" in label or any("جمع" in _n(x["text"]) for x in data if x["r0"] <= r <= x["r1"] and x["r1"] - x["r0"] < 2)
         vals: dict[str, Any] = {}
         confs: dict[str, float] = {}
         for key in ("prev", "period", "total"):
@@ -379,6 +421,8 @@ def parse_sheet(cells: list[dict], gray: np.ndarray | None = None) -> dict[str, 
         if not vals and not is_sum:
             continue
         row = {"section": label or None, "role": role, "sum": is_sum, **vals, "_conf": row_conf}
+        if rows and rows[-1]["sum"] and not (is_sum and label == rows[-1]["section"]):
+            break  # بعد از ردیف(های) «جمع»: امضاها و توضیحات، نه داده
         rows.append(row)
         if label and not is_sum and (not sections or sections[-1]["name"] != label):
             sections.append({"name": label, "contract": vals.get("contract")})
@@ -386,7 +430,12 @@ def parse_sheet(cells: list[dict], gray: np.ndarray | None = None) -> dict[str, 
             sections[-1]["contract"] = vals["contract"]
     if not rows:
         return None
-    total_row = next((x for x in rows if x["sum"]), None)
+    sums = [x for x in rows if x["sum"]]  # «جمع» گاهی برای هر رکن یک ردیف دارد: مشاور (تأییدشده) ملاک است
+    total_row = next((x for x in sums if x["role"] == "مشاور"), sums[0] if sums else None)
+    for x in sums:
+        if x is not total_row:
+            x["sum"] = False
+            x["sum_role"] = True
     if total_row is None:  # «جمع» خوانده نشد: ردیف آخرِ بی‌رکن که مبلغ قراردادش جمع بقیه است
         last = rows[-1]
         parts = [x.get("contract", 0) for x in rows[:-1]]
@@ -400,7 +449,7 @@ def parse_sheet(cells: list[dict], gray: np.ndarray | None = None) -> dict[str, 
         x.pop("_conf", None)
     by_role: dict[str, dict[str, int]] = {}
     for x in rows:
-        if x["role"] and not x["sum"]:
+        if x["role"] and not x["sum"] and not x.get("sum_role"):
             agg = by_role.setdefault(x["role"], {})
             for k in ("prev", "period", "total"):
                 if k in x:
@@ -449,7 +498,7 @@ def _reconcile(rows: list[dict], total_row: dict | None) -> list[dict]:
     for x in rows:
         if not all(k in x for k in ("prev", "period", "total")) or not x["total"]:
             continue
-        if abs(x["prev"] + x["period"] - x["total"]) <= max(2, x["total"] * 1e-6):
+        if abs(x["prev"] + x["period"] - x["total"]) <= 10:  # مبالغ دقیق‌اند؛ فقط گرد کردن چند ریال
             continue
         expected = {"total": x["prev"] + x["period"], "prev": x["total"] - x["period"], "period": x["total"] - x["prev"]}
         best = None
@@ -458,9 +507,12 @@ def _reconcile(rows: list[dict], total_row: dict | None) -> list[dict]:
                 continue
             old = x[key]
             x[key] = val
-            ok = sum(1 for k in ("prev", "period", "total") if _sum_ok(rows, total_row, k))
+            ok = sum(1 for k in ("prev", "period", "total") if _sum_ok(rows, total_row, k)) + _role_sum_ok(rows, x)
             x[key] = old
-            score = (-ok, _digit_diff(old, val), -x["_conf"].get(key, 0))
+            # همین عدد در ردیف‌های دیگر همان بخش هم هست؟ پس احتمالاً درست خوانده شده
+            support = sum(1 for o in rows if o is not x and o["section"] == x["section"] and old in
+                          (o.get("prev"), o.get("period"), o.get("total")))
+            score = (-ok, _digit_diff(old, val), support, -x["_conf"].get(key, 0))
             if best is None or score < best[0]:
                 best = (score, key, val)
         if best and best[0][1] <= 3:
@@ -508,3 +560,16 @@ def sheet_title(text: str) -> str | None:
         if "برگ" in ln and len(ln) < 60:
             return ln.strip(" :-|")
     return None
+
+
+def _role_sum_ok(rows: list[dict], x: dict) -> int:
+    """وقتی ردیف «جمع» برای هر رکن جدا آمده: چند ستونِ رکنِ این ردیف با جمع همان رکن می‌خواند."""
+    target = next((o for o in rows if (o["sum"] or o.get("sum_role")) and o["role"] == x["role"]), None)
+    if not target or not x["role"]:
+        return 0
+    n = 0
+    for k in ("prev", "period", "total"):
+        if k in target:
+            total = sum(o.get(k, 0) for o in rows if o["role"] == x["role"] and not o["sum"] and not o.get("sum_role"))
+            n += abs(total - target[k]) <= 10
+    return n

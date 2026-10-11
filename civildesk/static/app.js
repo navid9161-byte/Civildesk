@@ -965,6 +965,7 @@ function showBrief(id) {
   const dlg = $("#docbrief");
   const points = d.info?.points?.value || (d.info?.gist ? [d.info.gist.value] : []);
   const items = d.info?.items?.value || [];
+  const sections = ["done", "problems", "next"].map((k) => d.info?.[k]).filter((x) => x?.value?.length);  // گزارش ماهانه
   const viewable = d.kind === "pdf" || d.kind === "image";
   $("#db-title").innerHTML = `${catLabel(d.category || "other")} · ${esc(d.subject || d.title)}`;
   $("#db-body").innerHTML = `
@@ -978,7 +979,9 @@ function showBrief(id) {
           ${["contract", "prev", "period", "total"].map((k) => `<td title="${r[k] != null ? num(r[k]) : ""}">${r[k] ? shortMoney(r[k]) : r[k] === 0 ? "۰" : ""}</td>`).join("")}</tr>`).join("")}</tbody>
       </table></div>`).join("")}
     ${items.length ? `<h4>مصوبات</h4><ol class="items">${items.map((i) => `<li>${esc(faDigits(i))}</li>`).join("")}</ol>` : ""}
-    ${points.length ? `<h4>خلاصه‌ی متن</h4><ul class="points">${points.map((p) => `<li>${esc(faDigits(p))}</li>`).join("")}</ul>`
+    ${sections.map((sec) => `<h4>${esc(sec.label)}${sec.page && d.pages > 1 ? ` <a href="#" class="src-link" data-src="${d.id}:${sec.page}:${d.kind}">ص ${num(sec.page)}</a>` : ""}</h4>
+      <ol class="items">${sec.value.map((i) => `<li>${esc(faDigits(i))}</li>`).join("")}</ol>`).join("")}
+    ${points.length && !sections.length ? `<h4>خلاصه‌ی متن</h4><ul class="points">${points.map((p) => `<li>${esc(faDigits(p))}</li>`).join("")}</ul>`
       : d.info?.table ? `<p class="muted">📊 متن این سند بیشتر جدول و عدد است.</p>` : ""}
     <p class="muted small">${esc(d.title)} · ${d.pages ? `${num(d.pages)} صفحه · ` : ""}${d.ocr_pages ? "خوانده‌شده با OCR؛ اعداد را با سند چک کنید" : ""}</p>
     <div class="modal-actions">
