@@ -112,6 +112,7 @@ def _date_from_match(m: re.Match) -> str | None:
 HEADER_START, HEADER_END = "سربرگ:\n", "\n[پایان سربرگ]"
 # شماره‌ی نامه‌های اداری: «۱۴۰۵/۱۲۸۷/ص» (سال/ردیف/حرف)؛ «/» در OCR گاهی «ا» یا «|» خوانده می‌شود
 _LETTER_NO = re.compile(r"(?<!\d)(1[34]\d\d)\s*[/ا|\\]\s*(\d{2,6})(?!\d)(?:\s*[/ا|\\]?\s*([آ-ی])(?![آ-ی]))?")
+_LETTER_NO_REV = re.compile(r"(?<!\d)(\d{2,6})\s*[/ا|\\]\s*(1[34]\d\d)(?!\d)(?:\s*[/ا|\\]?\s*([آ-ی])(?![آ-ی]))?")
 _DATE_LOOSE = re.compile(r"(?<!\d)(1[34]\d\d)\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{1,2})")  # رقم اضافه‌ی بعدش (نقطه‌چین) مهم نیست
 
 
@@ -139,7 +140,24 @@ def _year_ok(y: int) -> bool:
     return cy - 40 <= y <= cy + 1
 
 
-def _header_votes(block: str) -> tuple[tuple[int, str] | None, tuple[int, str] | None]:
+def _top_candidates(body: str) -> tuple[list[tuple[int, int, str, str]], list[tuple[int, str]]]:
+    """شماره و تاریخ بی‌برچسب در ابتدای متن صفحه (در PDFهای Word برچسب‌ها در تصویر سربرگ‌اند و
+    فقط مقدارها در متن آمده‌اند، گاهی با ترتیب برعکس «ردیف/سال/حرف»)."""
+    top = body[:260]
+    nos = []
+    for rx, yi, qi in ((_LETTER_NO, 1, 2), (_LETTER_NO_REV, 2, 1)):
+        for m in rx.finditer(top):
+            y, q = int(m.group(yi)), m.group(qi)
+            if not _year_ok(y) or len(q) < 3:
+                continue
+            if yi == 2 and _year_ok(int(q[:4])) and len(q) == 4 and abs(int(q) - int(db.today_str()[:4])) < abs(y - int(db.today_str()[:4])):
+                y, q = int(q), str(y)  # هر دو شبیه سال‌اند: سال نزدیک‌تر به امسال
+            nos.append((m.start(), y, q, m.group(3) or ""))
+    dates = [(p, d) for p, d in _dates(top) if not _NOT_DOC_DATE.search(top[max(0, p - 16): p])][:1]
+    return nos, dates
+
+
+def _header_votes(block: str, body: str = "") -> tuple[tuple[int, str] | None, tuple[int, str] | None]:
     """شماره و تاریخ از چند خوانش سربرگ، با رأی‌گیری.
 
     خطاهای رایج OCR در کادر نقطه‌چین: صفرهای نقطه‌چین که به انتهای عدد می‌چسبند («۱۲۸۷۰......»)،
@@ -157,6 +175,9 @@ def _header_votes(block: str) -> tuple[tuple[int, str] | None, tuple[int, str] |
             seq = seq.rstrip("0")  # صفرهایی که از نقطه‌چین چسبیده‌اند
         if _year_ok(int(nm.group(1))):
             nos.append((m.start(), int(nm.group(1)), seq, nm.group(3) or ""))
+    top_nos, top_dates = _top_candidates(body)
+    off = len(HEADER_START) + len(block) + len(HEADER_END) if body else 0
+    nos += [(p + off, y, q, sfx) for p, y, q, sfx in top_nos] * 2  # متن خود صفحه: دو رأی
     number = None
     if nos:
         votes: dict[tuple[int, str], int] = {}
@@ -182,6 +203,7 @@ def _header_votes(block: str) -> tuple[tuple[int, str] | None, tuple[int, str] |
         parts.append((y, mo, d))
         if _year_ok(int(y)) and (date := _mkdate(y, mo, d)):
             full.append((m.start(), date))
+    full += [(p + off, d) for p, d in top_dates] * 2
     date = _vote(full)
     if date is None and parts:
         def pick(vals: list[str], ok) -> str | None:
@@ -199,7 +221,7 @@ def _header_votes(block: str) -> tuple[tuple[int, str] | None, tuple[int, str] |
 def labeled_date(text: str) -> tuple[int, str] | None:
     """تاریخ کنار برچسب «تاریخ:» (بعد یا قبل از آن، چون OCR گاهی ترتیب را برعکس می‌کند)."""
     block = header_block(text)
-    if block and (voted := _header_votes(block)[1]):
+    if block and (voted := _header_votes(block, strip_header(text))[1]):
         return voted
     for m in re.finditer(r"(?<!تا )(?<!از )(?<!به )" + LBL_DATE + SP + r"(?:نامه|جلسه|صدور|ثبت)?\s*[:.]?", text):
         dm = _DATE_RE.search(text[m.end(): m.end() + 45])
@@ -214,8 +236,13 @@ def labeled_date(text: str) -> tuple[int, str] | None:
 def labeled_number(text: str, letter: bool) -> tuple[int, str] | None:
     """شماره‌ی نامه/سند کنار برچسب «شماره:» (بعد یا قبل از آن)."""
     block = header_block(text)
-    if block and (voted := _header_votes(block)[0]):
+    if block and (voted := _header_votes(block, strip_header(text))[0]):
         return voted
+    if not block and letter:  # بدون سربرگ OCR: شماره‌ی بی‌برچسب بالای صفحه
+        top_nos = _top_candidates(text)[0]
+        if top_nos:
+            p, y, q, sfx = top_nos[0]
+            return p, f"{y}/{q}" + (f"/{sfx}" if sfx else "")
     extra = r"(?:نامه|ثبت\s*دبیرخانه)?" if letter else r"(?:نامه|قرارداد|پیمان|صورتجلسه)?"
     value = r"([0-9][\w/\-.]{0,24}(?:\s*/\s*[\w\-.]{1,12}){0,3})"
     for m in re.finditer(LBL_NO + SP + extra + _NOT_DOC_NO + r"\s*[:.]?\s*", text):
@@ -464,9 +491,17 @@ def _numeric_share(text: str) -> float:
     return sum(1 for t in toks if not re.search(r"[^\W\d_]", t)) / max(1, len(toks))
 
 
-def _units(text: str) -> list[str]:
+def fragmented(text: str) -> bool:
+    """متن تکه‌تکه (PDF Word): بیشتر سطرها تکه‌های کوتاه یک جمله‌اند."""
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    return len(lines) >= 8 and sum(len(ln.split()) <= 3 for ln in lines) > 0.4 * len(lines)
+
+
+def _units(text: str, reflow: bool = False) -> list[str]:
     """تبدیل متن (با سطرهای شکسته‌ی PDF یا OCR) به جمله‌ها و بندها."""
     units = []
+    if reflow or fragmented(text):  # تکه‌ها به هم وصل و فقط با نقطه جدا می‌شوند
+        text = re.sub(r"\s+", " ", text)
     for para in re.split(r"\n\s*\n", text):
         buf: list[str] = []
         lines = [ln.strip() for ln in para.split("\n") if ln.strip()]
@@ -487,13 +522,18 @@ def _units(text: str) -> list[str]:
     out = []
     for u in units:
         out += [x.strip() for x in re.split(r"(?<=[.؟!؛])\s+(?=\D)", u) if x.strip()]
+    if reflow or fragmented(text):
+        # نامه‌های Word اغلب جمله را با نقطه تمام نمی‌کنند؛ بعد از فعل‌های پایانی هم جدا می‌شود
+        ends = re.compile(r"(?<![آ-ی])(گردد|گردید|باشد|باشند|نمایید|فرمایید|نماید|فرماید|داریم|دارد|است|شود|شد|نمود|کنید)"
+                          r"\s+(?=[آ-ی])(?!(?:که|تا|و|چون|زیرا|ولی|اما)(?![آ-ی]))")  # «است که …» ادامه‌ی جمله است
+        out = [y.strip() for x in out for y in ends.sub(r"\1\n", x).split("\n") if y.strip()]
     return out
 
 
-def summarize(text: str, n: int = 3) -> list[str]:
+def summarize(text: str, n: int = 3, reflow: bool = False) -> list[str]:
     """خلاصه‌ی استخراجی: مهم‌ترین جمله‌ها به ترتیب متن (بدون سرنامه، جدول و متن خراب OCR)."""
     cands = []
-    for i, u in enumerate(_units(text)):
+    for i, u in enumerate(_units(text, reflow)):
         u = _SALUTE.sub("", _LIST_START.sub("", u)).strip(" -–:،,")
         words = u.split()
         if not 6 <= len(words) <= 80 or _HEADER_START.match(u) or _numeric_share(u) > 0.3:
@@ -587,6 +627,16 @@ def extract(text: str, category: str) -> dict[str, Any]:
     body_top = strip_header(text)
     off = len(text) - len(body_top)
     sub = _line_after(body_top[:2500], r"موضوع" + SP + r"(?:قرارداد|پیمان|جلسه|نامه)?\s*(?:عبارت\s+است\s+از)?")
+    if sub and category in ("letter", "order"):
+        # موضوع نامه گاهی چند سطر است (در PDFهای Word تکه‌تکه): تا «با سلام» یا خط خالی ادامه دارد
+        sm1 = re.search(r"موضوع" + SP + r"(?:نامه)?\s*[:\-–]?\s*", body_top[:2500])
+        if sm1:
+            seg = body_top[sm1.end(): sm1.end() + 450]
+            cut = re.search(r"\n\s*\n|با\s+سلام|سلام\s+علیکم|احتراما|با\s+احترام|^\s*(?:جناب|سرکار)", seg, re.M)
+            full_sub = " ".join(seg[: cut.start() if cut else len(seg)].split()).strip(" :.-–،")
+            full_sub = re.sub(r"\s+([)»\"])", r"\1", re.sub(r"([(«])\s+", r"\1", full_sub))
+            if len(full_sub) > len(sub[1]):
+                sub = (sub[0], full_sub[:220] + ("…" if len(full_sub) > 220 else ""))
     if sub:
         info["subject"] = {"pos": sub[0] + off, "value": sub[1]}
     elif category in ("letter", "order"):
@@ -602,18 +652,29 @@ def extract(text: str, category: str) -> dict[str, Any]:
 
     # گیرنده و فرستنده‌ی نامه
     rm = re.search(r"(?m)^\s*((?:جناب|سرکار|ریاست\s+محترم|مدیر\s*عامل\s+محترم|مدیریت\s+محترم|اداره\s+کل)[^\n]{3,120})",
-                   text[:1500])
+                   body_top[:1500])
     if rm:
-        info["to"] = {"pos": rm.start(1), "value": rm.group(1).strip()}
+        to = rm.group(1).strip()
+        # PDFهای Word: «جناب مهندس» و نام در سطرهای جدا
+        for ln in body_top[rm.end(1): rm.end(1) + 120].split("\n")[1:4]:
+            ln = ln.strip()
+            if not ln:
+                continue
+            if len(to.split()) >= 4 or len(ln.split()) > 3 or re.match(r"(مدیر|موضوع|با\s|ریاست|احترام|سلام)", ln):
+                break
+            to += " " + ln
+        info["to"] = {"pos": rm.start(1) + off, "value": to}
     for key, word in (("to", "به"), ("from", "از")):
-        fm = re.search(rf"(?m)^\s*{word}\s*:\s*([^\n]{{3,100}})", text[:1500])
+        fm = re.search(rf"(?m)^\s*{word}\s*:\s*([^\n]{{3,100}})", body_top[:1500])
         if fm and key not in info:
-            info[key] = {"pos": fm.start(1), "value": fm.group(1).strip()}
+            info[key] = {"pos": fm.start(1) + off, "value": fm.group(1).strip()}
 
     # خلاصه: مهم‌ترین جمله‌های سند (برای نامه‌ها، از متن بعد از سلام)
-    sm = re.search(r"(احتراما[ًٌء]?|با\s+سلام[^\n]{0,30}?(?:احترام|\n)|سلام\s+علیکم)", text[:2000])
-    summary = [] if category == "invoice" else summarize(text[sm.end():] if sm and category in ("letter", "order") else text,
-                        {"contract": 6, "amendment": 5, "report": 5, "minutes": 4, "invoice": 2}.get(category, 4))
+    # (فقط متن خود صفحه؛ سربرگِ OCRشده فقط برای شماره و تاریخ است)
+    sm = re.search(r"(احتراما[ًٌء]?|با\s+سلام[^\n]{0,30}?(?:احترام|\n)|سلام\s+علیکم)", body_top[:2000])
+    summary = [] if category == "invoice" else summarize(body_top[sm.end():] if sm and category in ("letter", "order") else body_top,
+                        {"contract": 6, "amendment": 5, "report": 5, "minutes": 4, "invoice": 2}.get(category, 4),
+                        reflow=fragmented(body_top))
     if summary:
         info["gist"] = {"pos": 0, "value": " ".join(summary[:3])}
         info["points"] = {"pos": 0, "value": summary}
@@ -1157,6 +1218,10 @@ def list_docs_by_id(doc_id: int) -> list[dict[str, Any]]:
 
 LETTER_CATS = ("letter", "order")
 _ASK = ("خواهشمند", "لازم است", "مقرر", "ابلاغ", "درخواست", "اعلام می", "دستور", "موظف", "ضروری", "اقدام")
+# جمله‌هایی که نکته‌ی اصلی نامه‌اند (مشکل، تأخیر، مطالبات…) بر جمله‌ی تعارفی «به پیوست … ارسال می‌گردد» مقدم‌اند
+_NOTABLE = ("شایان", "لازم به ذکر", "تاخیر", "تأخیر", "کمبود", "مشکل", "عدم", "توقف", "مطالبات", "خسارت", "تمدید",
+            "فوری", "اخطار", "تذکر", "جریمه", "متاسفانه", "متأسفانه", "مغایرت", "اعتراض")
+_BOILERPLATE = re.compile(r"^(?:با\s+احترام\s+)?(?:بدین\s*وسیله\s+)?(?:به\s+پیوست|ضمن\s+ارسال)")
 
 
 def _cut(text: str, limit: int) -> str:
@@ -1171,14 +1236,26 @@ def letter_summary(d: dict, limit: int = 230) -> str:
     pts = [p for p in pts if p]
     if not pts:
         return ""
+    pts = [_pretty(p) for p in pts]
     first = pts[0]
-    ask = next((p for p in pts[1:] if any(c in textnorm.normalize(p) for c in _ASK)), None)
-    if ask is None and len(pts) > 1 and len(first) < limit * 0.6:
+    norm = [textnorm.normalize(p) for p in pts]
+    ask = next((p for p, n in zip(pts[1:], norm[1:]) if any(textnorm.normalize(c) in n for c in _NOTABLE)), None) \
+        or next((p for p, n in zip(pts[1:], norm[1:]) if any(c in n for c in _ASK)), None)
+    if ask is None and len(pts) > 1 and (len(first) < limit * 0.6 or _BOILERPLATE.match(first)):
         ask = pts[1]
     if ask is None:
         return _cut(first, limit)
-    head = _cut(first, max(70, limit - len(ask) - 1))
-    return _cut(f"{head} {ask}", limit)
+    # جمله‌ی تعارفی اول کوتاه می‌شود تا نکته‌ی اصلی جا شود
+    head = _cut(first, max(70, limit - len(ask) - 1) if not _BOILERPLATE.match(first) else 95)
+    return _cut(f"{head} {ask}", limit + (40 if _BOILERPLATE.match(first) else 0))
+
+
+def _pretty(t: str) -> str:
+    """فاصله‌های متن PDF: «وCG2» ← «و CG2»، «" احداث» ← «"احداث»."""
+    t = textnorm._GLUED.sub(" ", t)
+    t = re.sub(r'(["«(])\s+', r"\1", t)
+    t = re.sub(r'\s+([")»،,.])', r"\1", t)
+    return " ".join(t.split())
 
 
 def letters_register(project_id: int | None) -> dict[str, Any]:

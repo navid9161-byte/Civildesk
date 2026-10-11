@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 os.environ.setdefault("OMP_THREAD_LIMIT", "1")
 MAX_ATTEMPTS = 3  # اگر پردازش یک صفحه این‌قدر بار نیمه‌کاره ماند (مثلاً کمبود حافظه)، آن صفحه رد می‌شود
 MAX_SHEET_PAGES = 6
-HEADER_BACKFILL = "2"  # با تغییر آن، سربرگ نامه‌های قبلی یک بار دیگر خوانده می‌شود
+HEADER_BACKFILL = "3"  # با تغییر آن، سربرگ نامه‌های قبلی یک بار دیگر خوانده می‌شود
 
 
 def release_memory() -> None:
@@ -223,6 +223,33 @@ def header_text(path: Path, kind: str) -> str:
         release_memory()
 
 
+def requeue_word_pdfs() -> int:
+    """یک بار: PDFهایی که متن واقعی دارند (Word) ولی قبلاً به‌خاطر رقم‌های برعکس با OCR خوانده شدند، دوباره خوانده شوند."""
+    with db.connect() as conn:
+        if db.kv_get(conn, "word_pdf_fix") == "1":
+            return 0
+        rows = conn.execute("SELECT id, path FROM documents WHERE status='ready' AND kind='pdf' AND pages <= 40 "
+                            "AND ocr_pages > 0").fetchall()
+    ids = []
+    for r in rows:
+        try:
+            import pymupdf
+
+            with pymupdf.open(r["path"]) as pdf:
+                if len(pdf[0].get_text("text").strip()) >= 100:
+                    ids.append(r["id"])
+        except Exception:
+            continue
+    with db.connect() as conn:
+        if ids:
+            conn.execute(f"UPDATE documents SET status='queued', pages_done=0, attempts=0 WHERE id IN ({','.join('?' * len(ids))})", ids)
+        db.kv_set(conn, "word_pdf_fix", "1")
+    release_memory()
+    if ids:
+        log.info("%d PDF متنی دوباره در صف خواندن قرار گرفت", len(ids))
+    return len(ids)
+
+
 def backfill_headers() -> int:
     """یک بار برای اسناد قبلی: نامه‌هایی که شماره یا تاریخشان پیدا نشده، سربرگشان جداگانه خوانده و دوباره تحلیل می‌شود."""
     if not ocr_available():
@@ -279,10 +306,13 @@ def read_sheet_page(path: Path, kind: str, page_no: int) -> dict[str, Any] | Non
 def _best_text(text_layer: str, ocr_fn) -> tuple[str, str]:
     """انتخاب بهترین متن بین لایه‌ی متنی PDF و OCR. خروجی: (متن، روش)."""
     fixed, reversed_ = textnorm.fix_direction(text_layer)
+    fixed, repaired = textnorm.repair_word_pdf(fixed)  # رقم‌های برعکس و «لا»ی شکسته‌ی PDFهای Word
     q = textnorm.quality(fixed)
-    method = "fixed" if reversed_ else "text"
+    method = "fixed" if reversed_ or repaired else "text"
     if q["words"] >= 15 and q["score"] >= GOOD_SCORE and q["bad"] <= 0.02:
         return fixed, method
+    if repaired and q["words"] >= 15 and q["score"] >= 0.85:
+        return fixed, method  # PDF Word تعمیرشده: متن خودش دقیق‌تر از OCR است
     if ocr_fn is None:
         return fixed, (method if q["words"] >= 15 and q["score"] >= 0.6 else "weak")
     try:
@@ -726,6 +756,7 @@ class Worker:
         try:
             archive.upgrade()  # بعد از به‌روزرسانی برنامه: تحلیل دوباره (و خواندن دوباره‌ی اسناد خراب)
             archive.analyze_pending()  # اسنادی که هنوز تحلیل نشده‌اند
+            requeue_word_pdfs()  # PDFهای Word که قبلاً اشتباهی OCR شدند
             backfill_headers()  # نامه‌های قبلی بی‌شماره/بی‌تاریخ
         except Exception:
             log.exception("تحلیل اسناد قدیمی ناموفق بود")
