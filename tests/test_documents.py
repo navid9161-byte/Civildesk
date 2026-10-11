@@ -190,7 +190,7 @@ def _calls(monkeypatch) -> list[int]:
     seen: list[int] = []
     orig = documents._best_text
 
-    def counting(text_layer, ocr_fn):
+    def counting(text_layer, ocr_fn, *args):
         seen.append(int(text_layer.split(":")[0].split()[-1]))
         return orig(text_layer, None)
 
@@ -235,14 +235,68 @@ def test_page_that_keeps_crashing_is_skipped(monkeypatch):
     assert seen == [1, 2, 3, 4, 5] and documents.get_document(d["id"])["error"] is None
 
 
-def test_requeue_word_pdfs_once():
+def test_requeue_improved_once():
     from civildesk import db
 
     d = documents.add_document(io.BytesIO(_pdf(2)), "word.pdf")
     documents.worker.run_pending()
     with db.connect() as conn:  # مثل نامه‌ای که با نسخه‌ی قبلی اشتباهی OCR شده بود
         conn.execute("UPDATE documents SET ocr_pages=1 WHERE id=?", (d["id"],))
-        conn.execute("DELETE FROM kv WHERE key='word_pdf_fix'")
-    assert documents.requeue_word_pdfs() == 1
+        conn.execute("DELETE FROM kv WHERE key='reread'")
+    assert documents.requeue_improved() == 1
     assert documents.get_document(d["id"])["status"] == "queued"
-    assert documents.requeue_word_pdfs() == 0
+    assert documents.requeue_improved() == 0
+
+
+def test_rotated_scan_page_is_turned_upright():
+    import pymupdf
+
+    from tests.fixtures import rotated_scan
+
+    if not documents.ocr_available():
+        pytest.skip("Tesseract نصب نیست")
+    for turn, fix in ((270, 90), (90, 270)):
+        img = documents._render_gray(pymupdf.open(stream=rotated_scan.build(turn))[0], 150)
+        assert documents.page_rotation(img) == fix
+    upright = documents._render_gray(pymupdf.open(stream=rotated_scan.build(0))[0], 150)
+    assert documents.page_rotation(upright) == 0
+    text = documents._ocr_pdf_page(pymupdf.open(stream=rotated_scan.build(270))[0])
+    assert "تاسیسات" in text and "پیشرفت کار" in text  # صاف شده و خوانا (کج، فقط حروف درهم بود)
+
+
+def test_requeue_rotated_scan():
+    from civildesk import db
+
+    from tests.fixtures import rotated_scan
+
+    d = documents.add_document(io.BytesIO(rotated_scan.build(270)), "اسکن.pdf")
+    with db.connect() as conn:  # خوانده‌شده با نسخه‌ی قبلی (بدون صاف کردن صفحه)
+        conn.execute("UPDATE documents SET status='ready', pages=1, pages_done=1, ocr_pages=1 WHERE id=?", (d["id"],))
+        conn.execute("DELETE FROM kv WHERE key='reread'")
+    assert documents.requeue_improved() == 1
+
+
+def test_excel_report_read_from_text_layer():
+    from civildesk import archive
+
+    from tests.fixtures import excel_report
+
+    d = documents.add_document(io.BytesIO(excel_report.build()), "monthly.pdf")
+    documents.worker.run_pending()
+    doc = documents.get_document(d["id"])
+    assert doc["status"] == "ready" and doc["ocr_pages"] == 0  # متن خود Excel، بدون OCR
+    row = archive.list_docs_by_id(d["id"])[0]
+    info = row["info"]
+    assert row["category"] == "report"
+    assert row["doc_no"] == "ABC-XY-MR-007"  # کد گزارش، نه شماره‌ی قرارداد
+    assert row["doc_date"] == "1405/07/30"  # پایان مهر، نه «تاریخ شروع به کار»
+    assert row["subject"] == "گزارش ماهانه مهر 1405"
+    assert info["done"]["page"] == 5 and info["done"]["value"] == [
+        "انجام اقدامات مربوط به تجهیز کارگاه", "اجرای عملیات خاکریزی از کیلومتر 0+000 الی 12+000",
+        "برگزاری کلاس ایمنی برای پرسنل کارگاه"]  # «کالس» ← «کلاس»
+    assert info["problems"]["page"] == 14  # بعد از ۱۲ صفحه‌ی اول هم خوانده می‌شود
+    assert info["problems"]["value"] == ["تاخیر در تحویل زمین بازه دوم از طرف کارفرما", "کمبود ماشین آلات سنگین در کارگاه"]
+    assert info["next"]["value"] == ["اجرای عملیات ابنیه کالورتهای بازه 2 (ادامه)", "اجرای عملیات زیراساس بازه 1 (جدید)"]
+    assert info["manpower"]["value"] == 2400 and info["manpower"]["avg"] == 80
+    labels = {r["label"]: r["value"] for r in row["brief"]}
+    assert labels["شماره‌ی گزارش"] == "ABC-XY-MR-007" and "2,400" in labels["نیروی انسانی"]

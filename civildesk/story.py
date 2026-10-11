@@ -150,7 +150,22 @@ def event_core(d: dict, contract_amount: int | None = None) -> str:
     if cat == "contract":
         return f"قرارداد{' شماره‌ی ' + no if no else ''} {subj or title}" + (f" به مبلغ {fa_money(amount)}" if amount else "") + f" منعقد شد{said()}."
     if cat == "report":
-        return f"گزارش {subj or title} تهیه شد{said('در این گزارش آمده است')}."
+        done, problems, nxt = (_v(info, k) or [] for k in ("done", "problems", "next"))
+        if not (done or problems or nxt):
+            return f"گزارش {subj or title} تهیه شد{said('در این گزارش آمده است')}."
+        period = _v(info, "period")
+        s = (f"گزارش ماهانه‌ی {period}" if period else f"گزارش {subj or title}") + (f" (شماره‌ی {no})" if no else "") + " تهیه شد"
+        if done:
+            s += "؛ در این ماه " + join_fa([x.rstrip(".؛ ") for x in done[:4]]) + " انجام شد"
+        mp = info.get("manpower")
+        if mp:
+            s += f" و در مجموع {mp['value']:,} نفر-روز در کارگاه کار کردند" + (f" (به‌طور میانگین {mp['avg']} نفر در روز)" if mp.get("avg") else "")
+        s += "."
+        if problems:
+            s += (" مهم‌ترین مشکل گزارش‌شده " if len(problems) == 1 else " مشکلات گزارش‌شده: ") + join_fa([quote(x, 140) for x in problems[:3]]) + " بود."
+        if nxt:
+            s += " برای ماه بعد " + join_fa([x.rstrip(".؛ ") for x in nxt[:3]]) + (" و کارهای دیگر" if len(nxt) > 3 else "") + " برنامه‌ریزی شده است."
+        return s
     if cat == "financial":
         return f"سند مالی {title}" + (f" به مبلغ {fa_money(amount)}" if amount else "") + " ثبت شد."
     if cat in ("drawing", "photo"):

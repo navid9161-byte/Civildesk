@@ -191,14 +191,25 @@ LAM_ALEF = {
     "تمایالت": "تمایلات", "مشکالت": "مشکلات", "تشکیالت": "تشکیلات", "تحویالت": "تحویلات", "اختالف": "اختلاف",
     "ائتالف": "ائتلاف", "خالف": "خلاف", "برخالف": "برخلاف", "مالک": "ملاک", "عالی": "عالی", "اوال": "اولا",
     "ثانیا": "ثانیا", "اضافه": "اضافه", "تکمیال": "تکمیلا", "بالاستفاده": "بلااستفاده",
+    "آالت": "آلات", "تسهیالت": "تسهیلات", "کالس": "کلاس", "آمبوالنس": "آمبولانس", "پالنت": "پلانت",
+    "استعالم": "استعلام", "طالیی": "طلایی", "دالر": "دلار", "مبتال": "مبتلا",
 }
-_LAM_ALEF_SIGNS = re.compile(r"با\s+سالم|االرض|(?<![آ-ی])(?:الزم|اعالم|اطالع|باال|ابالغ|مالحظه|خالصه|اصالح)(?![آ-ی])")
+_LAM_ALEF_SIGNS = re.compile(r"با\s+سالم|االرض|(?<![آ-ی])(?:الزم|اعالم|اطالع|باال|ابالغ|مالحظه|خالصه|اصالح|مشکالت|آالت)(?![آ-ی])")
 _LAM_ALEF_RE = re.compile(r"(?<![آ-یءئ])(" + "|".join(sorted((k for k, v in LAM_ALEF.items() if k != v), key=len, reverse=True))
                           + r")(?=$|[^آ-ی]|ها|های|ات|ی|یه|ه)")
 
 
-def repair_word_pdf(text: str) -> tuple[str, bool]:
-    """تعمیر دو اثر رایج PDFهای Word فارسی (رقم‌های برعکس و «لا»ی شکسته)؛ فقط اگر نشانه‌اش در متن باشد."""
+def lam_alef_broken(text: str) -> bool:
+    """«لا» در این متن (PDF ساخته‌ی Word/Excel) به «ال» شکسته است؟"""
+    t = unicodedata.normalize("NFKC", text)
+    return "لا" not in t and bool(_LAM_ALEF_SIGNS.search(t))
+
+
+def repair_word_pdf(text: str, lam: bool | None = None) -> tuple[str, bool]:
+    """تعمیر دو اثر رایج PDFهای Word فارسی (رقم‌های برعکس و «لا»ی شکسته)؛ فقط اگر نشانه‌اش در متن باشد.
+
+    lam: تصمیم «لا»ی شکسته برای کل سند (صفحه‌ای که خودش نشانه ندارد هم تعمیر شود)؛ None یعنی از روی همین متن.
+    """
     changed = False
     t = unicodedata.normalize("NFKC", text).translate(str.maketrans({"ي": "ی", "ى": "ی", "ك": "ک"}))
     runs = _AR_DIGITS.findall(t)
@@ -209,7 +220,7 @@ def repair_word_pdf(text: str) -> tuple[str, bool]:
         changed = True
     if runs:
         t = t.translate(_AR_TO_EN)  # یکدست: «٠7» (رقم عربی کنار لاتین) ← «07»
-    if "لا" not in t and len(_LAM_ALEF_SIGNS.findall(t)) >= 1:
+    if lam if lam is not None else ("لا" not in t and len(_LAM_ALEF_SIGNS.findall(t)) >= 1):
         t2 = _LAM_ALEF_RE.sub(lambda m: LAM_ALEF[m.group(1)], t)
         changed = changed or t2 != t
         t = t2

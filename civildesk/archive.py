@@ -33,7 +33,9 @@ CATEGORIES: dict[str, str] = {
 }
 EDITABLE = ("category", "doc_date", "doc_no", "subject")
 ANALYZE_PAGES = 12  # فقط صفحه‌های اول برای تشخیص، استخراج و خلاصه
-ARCHIVE_VERSION = "4"  # با تغییر آن، همه‌ی اسناد یک بار دوباره تحلیل می‌شوند
+TEXT_PAGES = 40  # متن این تعداد صفحه نگه داشته می‌شود (بخش‌های گزارش ماهانه، مثل مشکلات، در صفحه‌های بعدی‌اند)
+TEXT_CHARS = 150000
+ARCHIVE_VERSION = "5"  # با تغییر آن، همه‌ی اسناد یک بار دوباره تحلیل می‌شوند
 
 # واژه‌های هر دسته (به شکل یکسان‌شده‌ی textnorm.normalize)
 _KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -367,7 +369,7 @@ def invoice_fields(text: str, flat: str) -> dict[str, Any]:
           or re.search(r"شماره" + W + r"(?:صورت" + W + r")?وضعیت" + W + r"[:.]?" + W + r"(\d{1,3})(?!\d)", flat)
           or re.search(r"صورت" + W + r"وضعیت" + W + r"(?:موقت|قطعی)?" + W + r"(\d{1,3})(?![\d/])", flat))
     if im:
-        info["invoice_no"] = {"pos": im.start(), "value": im.group(1)}
+        info["invoice_no"] = {"pos": im.start(), "value": str(int(im.group(1)))}  # «۰۶» ← «6»
 
     # دوره‌ی کارکرد
     for pm in re.finditer(r"(?:دوره|از" + W + r"تاریخ|کارکرد" + W + r"از|مدت" + W + r"کارکرد)", flat):
@@ -376,7 +378,7 @@ def invoice_fields(text: str, flat: str) -> dict[str, Any]:
             info["period"] = {"pos": pm.start(), "value": f"{ds[0][1]} تا {ds[1][1]}", "from": ds[0][1], "to": ds[1][1]}
             break
     if "period" not in info:
-        mm = re.search(rf"(?:ماه|دوره|کارکرد)[^\n\d]{{0,12}}?({_MONTHS})(?:" + W + rf"(?:تا|الی|لغایت|-)" + W +
+        mm = re.search(rf"(?:ماه|دوره|کارکرد)[^\n\d]{{0,12}}?({_MONTHS})(?:" + W + r"(?:تا|الی|لغایت|-)" + W +
                        rf"({_MONTHS}))?" + W + r"(?:ماه" + W + r")?(?:سال" + W + r")?(1[34]\d\d)", flat)
         if mm:
             label = f"{mm.group(1)}{' تا ' + mm.group(2) if mm.group(2) else ''} {mm.group(3)}"
@@ -561,6 +563,172 @@ def summarize(text: str, n: int = 3, reflow: bool = False) -> list[str]:
     return [u if len(u) <= 280 else u[:280].rsplit(" ", 1)[0] + "…" for _, _, u in sorted(best, key=lambda x: x[1])]
 
 
+# ───────────────────────── گزارش ماهانه ─────────────────────────
+
+# کد سند پروژه، مثل «CHGL-MG-MR-013» (گزارش) یا «CHGL-MG-INV-C-006» (صورت‌وضعیت)
+_DOC_CODE = re.compile(r"(?<![A-Za-z0-9\-])([A-Z]{2,8}(?:-[A-Z0-9]{1,8}){2,6})(?![A-Za-z0-9\-])")
+REPORT_SECTIONS: tuple[tuple[str, str, str], ...] = (
+    ("done", "اقدامات انجام‌شده", r"(?:خلاصه\s+)?اقدامات\s+انجام\s*شده|(?:مهمترین|مهم\s*ترین)\s+فعالیت\s*های\s+انجام\s*شده"),
+    ("problems", "مشکلات و موانع", r"مشکلات\s+و\s+موانع"),
+    ("next", "برنامه‌ی ماه آینده", r"(?:پیش\s*بینی|برنامه)\s+فعالیت(?:\s*های)?\s+ماه\s+[آا]تی"),
+)
+
+
+def doc_code(text: str) -> tuple[int, str] | None:
+    """کد سند (مثل CHGL-MG-MR-013)؛ ترجیحاً بعد از «شماره گزارش / شماره سند»، وگرنه پرتکرارترین کد."""
+    codes = [(m.start(1), m.group(1)) for m in _DOC_CODE.finditer(text)]
+    codes = [(p, c) for p, c in codes if re.search(r"\d", c)]
+    if not codes:
+        return None
+    for p, c in codes:
+        if re.search(LBL_NO + r"\s*(?:گزارش|سند|مدرک|صورت\s*وضعیت)?\s*[:：]?[^\n]{0,40}\n?[^\n]{0,30}$", text[max(0, p - 80): p]):
+            return p, c
+    best = max({c for _, c in codes}, key=lambda c: sum(1 for _, x in codes if x == c))
+    return next((p, c) for p, c in codes if c == best)
+
+
+def month_end(year: int, month: int) -> str:
+    if month <= 6:
+        day = 31
+    elif month <= 11:
+        day = 30
+    else:  # اسفند: ۳۰ روزه فقط در سال کبیسه
+        y2, m2, d2 = jalali.gregorian_to_jalali(*jalali.jalali_to_gregorian(year, 12, 30))
+        day = 30 if (m2, d2) == (12, 30) else 29
+    return f"{year}/{month:02d}/{day:02d}"
+
+
+def report_period(text: str) -> tuple[int, str, str] | None:
+    """دوره‌ی گزارش ماهانه («منتهی به شهریور ماه 1405») ← (موقعیت، «شهریور 1405»، تاریخ پایان ماه)."""
+    cands = [(m.start(), m.group(1), int(m.group(2))) for m in
+             re.finditer(rf"({_MONTHS}){W}(?:ماه)?{W}(?:سال{W})?(1[34]\d\d)(?!\d)", text)]
+    if not cands:  # Excel: «منتهی به» و سال و نام ماه در سطرهای جدا
+        mm = re.search(rf"منتهی{W}به[\s\S]{{0,400}}?({_MONTHS}){W}ماه", text)
+        yy = re.search(r"منتهی\s*به\s*\n?\s*(1[34]\d\d)(?!\d)", text)
+        if not (mm and yy):
+            return None
+        cands = [(mm.start(1), mm.group(1), int(yy.group(1)))]
+    def weight(k: tuple[str, int]) -> int:  # «منتهی به …» قبل از آن نشانه‌ی قطعی دوره‌ی گزارش است
+        return sum(1 + 10 * bool(re.search(rf"منتهی{W}به{W}$", text[max(0, c[0] - 20): c[0]]))
+                   for c in cands if (c[1], c[2]) == k)
+    key = max({(c[1], c[2]) for c in cands}, key=weight)
+    pos = next(c[0] for c in cands if (c[1], c[2]) == key)
+    month = jalali.MONTHS_FA.index(key[0]) + 1
+    return pos, f"{key[0]} {key[1]}", month_end(key[1], month)
+
+
+def _boilerplate(pages: list[tuple[int, str]]) -> set[str]:
+    """کلمه‌های سطرهایی که در سربرگ بیشتر صفحه‌ها تکرار شده‌اند (نام پروژه، «شماره قرارداد»…)."""
+    seen: dict[str, set[int]] = {}
+    for no, t in pages:
+        for ln in t.split("\n"):
+            ln = " ".join(ln.split())
+            if ln:
+                seen.setdefault(ln, set()).add(no)
+    need = max(3, len(pages) // 3)
+    words: set[str] = set()
+    for ln, ps in seen.items():
+        if len(ps) >= need:
+            words.update(textnorm.normalize(ln).split())
+    return words
+
+
+def _fix_chainage(s: str) -> str:
+    # کیلومتراژ در خروجی Excel راست‌به‌چپ برعکس می‌آید: «000 + 15» یعنی «15+000»
+    return re.sub(r"(?<![\d+])(\d{3})\s*\+\s*(\d{1,3})(?![\d+])", r"\2+\1", s)
+
+
+def _section_items(page: str, title: re.Pattern, boiler: set[str]) -> list[str]:
+    items: list[str] = []
+    for ln in page.split("\n"):
+        ln = " ".join(ln.split())
+        if not ln:
+            continue
+        if re.fullmatch(r"[\d+\-/.,]+|(?:الی|تا|از)\s*[\d+]+", ln):
+            # تکه‌ی کیلومتراژ سطر قبل («000» «+» «0» «الی000»…)؛ عدد تنها در غیر این صورت شماره‌ی ردیف است
+            prev = items[-1] if items else ""
+            if prev and (not ln[0].isdigit() or prev.endswith("+") or (ln == "+" and prev[-1].isdigit())):
+                items[-1] = _fix_chainage(f"{prev} {ln}")
+            continue
+        norm = textnorm.normalize(ln)
+        words = [w for w in norm.split() if re.search(r"[آ-ی]", w)]
+        if len(words) < 3 or title.search(norm) or any(re.search(p, norm) for _, _, p in REPORT_SECTIONS):
+            continue
+        if sum(1 for w in words if w in boiler) >= 0.6 * len(words):
+            continue
+        if re.match(r"(ردیف|شرح|توضیحات|عنوان|برنامه زمانی|تاریخ)\b", norm) and len(words) <= 4:
+            continue
+        ln = re.sub(r"^\d{1,2}\s+(?=[آ-ی])", "", ln)  # شماره‌ی ردیف
+        ln = re.sub(r"\s+(ادامه|جدید|اتمام)$", r" (\1)", ln)  # ستون توضیحات کنار شرح
+        if ln not in items:
+            items.append(ln)
+    return items[:12]
+
+
+def apply_report(info: dict[str, Any], rep: dict[str, Any]) -> None:
+    """افزودن اطلاعات گزارش ماهانه به اطلاعات عمومی سند (تاریخ = پایان ماه گزارش؛ خلاصه = اقدامات و مشکلات)."""
+    info.update(rep)
+    if "report_no" in rep:
+        info["doc_no"] = dict(rep["report_no"])
+    per = rep.get("period")
+    if per:
+        # تاریخ گزارش = پایان ماه آن (تاریخ‌های برچسب‌دار گزارش، مثل «تاریخ شروع به کار»، تاریخ خود گزارش نیستند)
+        info["doc_date"] = {"page": per["page"], "value": per["to"], "guessed": True}
+        info["subject"] = {"page": per["page"], "value": f"گزارش ماهانه {per['value']}"}
+    points = []
+    for key, label in (("done", "اقدامات این ماه"), ("problems", "مشکلات"), ("next", "برنامه‌ی ماه آینده")):
+        items = (rep.get(key) or {}).get("value") or []
+        if items:
+            points.append(f"{label}: " + "؛ ".join(items[:4]) + ("…" if len(items) > 4 else ""))
+    if points:
+        info["points"] = {"pos": 0, "value": points}
+        info["gist"] = {"pos": 0, "value": " ".join(points[:2])}
+        info.pop("table", None)
+
+
+def report_fields(pages: list[tuple[int, str]]) -> dict[str, Any]:
+    """گزارش ماهانه‌ی پیشرفت کار: کد و دوره‌ی گزارش و فهرست اقدامات، مشکلات و برنامه‌ی ماه بعد."""
+    info: dict[str, Any] = {}
+    pages = [(no, strip_header(t)) for no, t in pages]
+    text = "\n\n".join(t for _, t in pages)
+    page_at = []
+    pos = 0
+    for no, t in pages:
+        page_at.append((pos, no))
+        pos += len(t) + 2
+
+    def page_of(p: int) -> int:
+        return next((no for start, no in reversed(page_at) if start <= p), 1)
+
+    code = doc_code(text[:20000])
+    if code:
+        info["report_no"] = {"page": page_of(code[0]), "value": code[1]}
+    per = report_period(text)
+    if per:
+        info["period"] = {"page": page_of(per[0]), "value": per[1], "to": per[2]}
+    boiler = _boilerplate(pages)
+    for key, label, pattern in REPORT_SECTIONS:
+        title = re.compile(pattern)
+        for no, t in pages:
+            norm = textnorm.normalize(t)
+            if not title.search(norm) or "فهرست" in norm or sum(bool(re.search(p, norm)) for _, _, p in REPORT_SECTIONS) >= 2:
+                continue  # فهرست مطالب همه‌ی عنوان‌ها را دارد
+            items = _section_items(t, title, boiler)
+            if items:
+                info[key] = {"page": no, "value": items, "label": label}
+                break
+    for no, t in pages:  # جمع نفر-روز نیروی انسانی در ماه (و میانگین روزانه)
+        m = re.search(r"((?:\d[\d,]*\s+){1,4})جمع\s+نفرات", t)
+        if not m:
+            continue
+        nums = [int(x.replace(",", "")) for x in m.group(1).split()]
+        total = max(nums)
+        avg = next((x for x in nums if x and 25 <= total / x <= 32), None)
+        info["manpower"] = {"page": no, "value": total, **({"avg": avg} if avg else {})}
+        break
+    return info
+
+
 # ───────────────────────── دسته‌بندی ─────────────────────────
 
 
@@ -580,14 +748,20 @@ def classify(title: str, text: str, kind: str, pages: int) -> str:
     letter_like = salut or header_marks >= 3
 
     # سطرهای ابتدایی: عنوان سند
-    top = _norm_padded(head_raw[:260])
+    # «شماره قرارداد»، «مبلغ قرارداد»… در سربرگ برچسب‌اند، نه عنوان سند
+    top = re.sub(r" (?:شماره|مبلغ|تاریخ|مدت|نوع) (?:قرارداد|پیمان) ", " ", _norm_padded(head_raw[:260]))
+    found = []
     for cat, ws in _HEAD_TITLES:
-        if any(_count(top, w) for w in ws):
-            if cat == "contract" and letter_like and pages <= 3:
-                continue  # «شماره قرارداد» در سرنامه‌ی یک نامه
-            if cat in ("invoice", "report", "drawing", "financial") and salut:
-                continue  # نامه‌ی ارسال صورت‌وضعیت/گزارش هنوز «نامه» است
-            return cat
+        hits = [top.find(f" {w}") for w in ws if _count(top, w)]
+        if not hits:
+            continue
+        if cat == "contract" and letter_like and pages <= 3:
+            continue  # «شماره قرارداد» در سرنامه‌ی یک نامه
+        if cat in ("invoice", "report", "drawing", "financial") and salut:
+            continue  # نامه‌ی ارسال صورت‌وضعیت/گزارش هنوز «نامه» است
+        found.append((min(hits), cat))
+    if found:  # اولین عنوان در سطرهای اول
+        return min(found)[1]
     if letter_like and pages <= 4:
         return "letter"
 
@@ -609,7 +783,6 @@ def extract(text: str, category: str) -> dict[str, Any]:
     """اطلاعات کلیدی سند؛ هر مورد با موقعیتش در متن (pos) برای یافتن شماره‌ی صفحه."""
     info: dict[str, Any] = {}
     flat = text.replace("\n", " ")  # هم‌طول با text
-    head = text[:900]
 
     # شماره و تاریخ سند: کادر سربرگ ممکن است در متن OCR جلوتر یا عقب‌تر بیاید، پس بخش بزرگ‌تری جست‌وجو می‌شود
     top = text[:3000]
@@ -772,28 +945,30 @@ def extract(text: str, category: str) -> dict[str, Any]:
 # ───────────────────────── تحلیل یک سند ─────────────────────────
 
 
-def _doc_text(conn, doc_id: int, page_texts: list[tuple[int, str]] | None) -> tuple[str, list[int], list[int]]:
-    """متن صفحه‌های اول؛ ترجیحاً متن اصلی صفحه (با سطرهای دست‌نخورده)، وگرنه از روی بندهای نمایه‌شده."""
+def _doc_pages(conn, doc_id: int, page_texts: list[tuple[int, str]] | None) -> list[tuple[int, str]]:
+    """متن صفحه‌های نگه‌داشته‌شده؛ ترجیحاً متن اصلی صفحه (با سطرهای دست‌نخورده)، وگرنه از روی بندهای نمایه‌شده."""
     if page_texts is None:
         row = conn.execute("SELECT head_text FROM documents WHERE id = ?", (doc_id,)).fetchone()
         if row and row["head_text"]:
-            page_texts = json.loads(row["head_text"])
-        else:  # اسناد قدیمی: از روی بندهای نمایه‌شده (سطرها به هم چسبیده‌اند)
-            page_texts = [(r["page"], r["text"]) for r in conn.execute(
-                "SELECT page, text FROM doc_chunks WHERE doc_id = ? AND page <= ? ORDER BY page, seq",
-                (doc_id, ANALYZE_PAGES),
-            )]
-    else:
-        keep, size = [], 0
-        for page, raw in page_texts[: ANALYZE_PAGES + 2]:
-            keep.append((page, raw[:20000]))
-            size += len(raw)
-            if size > 80000:
-                break
-        page_texts = keep
-        conn.execute("UPDATE documents SET head_text = ? WHERE id = ?", (json.dumps(keep, ensure_ascii=False), doc_id))
+            return [tuple(x) for x in json.loads(row["head_text"])]
+        # اسناد قدیمی: از روی بندهای نمایه‌شده (سطرها به هم چسبیده‌اند)
+        return [(r["page"], r["text"]) for r in conn.execute(
+            "SELECT page, text FROM doc_chunks WHERE doc_id = ? AND page <= ? ORDER BY page, seq",
+            (doc_id, ANALYZE_PAGES),
+        )]
+    keep, size = [], 0
+    for page, raw in page_texts[: TEXT_PAGES + 2]:
+        keep.append((page, raw[:20000]))
+        size += len(raw)
+        if size > TEXT_CHARS:
+            break
+    conn.execute("UPDATE documents SET head_text = ? WHERE id = ?", (json.dumps(keep, ensure_ascii=False), doc_id))
+    return keep
+
+
+def _join_pages(page_texts: list[tuple[int, str]]) -> tuple[str, list[int], list[int]]:
     parts, starts, pages, pos = [], [], [], 0
-    for page, raw in page_texts[: ANALYZE_PAGES * 20]:
+    for page, raw in page_texts:
         t = _prep(raw) + "\n\n"
         starts.append(pos)
         pages.append(page)
@@ -802,13 +977,19 @@ def _doc_text(conn, doc_id: int, page_texts: list[tuple[int, str]] | None) -> tu
     return "".join(parts), starts, pages
 
 
+def _analysis_pages(all_pages: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    head = [p for p in all_pages if p[0] <= ANALYZE_PAGES]
+    return head + [p for p in all_pages if p[0] > ANALYZE_PAGES][-2:]
+
+
 def analyze(doc_id: int, page_texts: list[tuple[int, str]] | None = None,
             sheets: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     with db.connect() as conn:
         d = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
         if not d:
             raise db.NotFound("سند پیدا نشد")
-        text, starts, pages = _doc_text(conn, doc_id, page_texts)
+        all_pages = _doc_pages(conn, doc_id, page_texts)
+        text, starts, pages = _join_pages(_analysis_pages(all_pages))
         if sheets is None:
             sheets = json.loads(d["sheets"] or "[]")
         else:
@@ -818,6 +999,10 @@ def analyze(doc_id: int, page_texts: list[tuple[int, str]] | None = None,
         info = extract(text, category) if text.strip() else {}
         if category == "invoice" and sheets:
             apply_sheets(info, sheets)
+        if category == "report" and all_pages:
+            apply_report(info, report_fields([(p, _prep(t)) for p, t in all_pages]))
+        if category in ("invoice", "report") and "report_no" not in info and (code := doc_code(text[:6000])):
+            info["doc_no"] = {"pos": code[0], "value": code[1]}  # کد سند، نه شماره‌ی قرارداد در سربرگ
         if category == "invoice" and "invoice_no" not in info:  # «وضعیت شماره ۳.pdf»
             tm = re.search(r"(\d{1,3})(?!\d)", _prep(d["title"]))
             if tm:
@@ -978,6 +1163,15 @@ def doc_brief(d: dict) -> list[dict[str, Any]]:
         add("درصد پیشرفت", value=f"{info['progress']['value']:g}٪" if info.get("progress") else None)
         if info.get("work_check"):
             rows.append({"label": "⚠️ کنترل جمع", "value": "کارکرد قبلی + این دوره با جمع کارکرد نمی‌خواند؛ اعداد را با سند چک کنید"})
+    elif cat == "report":
+        add("شماره‌ی گزارش", value=d.get("doc_no"))
+        add("دوره‌ی گزارش", "period")
+        add("تاریخ", value=d.get("doc_date"))
+        mp = info.get("manpower")
+        if mp:
+            add("نیروی انسانی", "manpower", value=f"{mp['value']:,} نفر-روز در ماه" + (f" (میانگین {mp['avg']} نفر در روز)" if mp.get("avg") else ""))
+        for key, label in (("employer", "کارفرما"), ("contractor", "پیمانکار"), ("consultant", "مشاور")):
+            add(label, key)
     else:
         add("شماره", value=d.get("doc_no"))
         add("تاریخ", value=d.get("doc_date"))

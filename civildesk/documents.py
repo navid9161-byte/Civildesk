@@ -171,14 +171,108 @@ def ocr_image(path: str) -> str:
     return merged if rate(mq) >= rate(qd) else text
 
 
-def _ocr_pdf_page(page) -> str:
+def _probe(path: str, langs: str) -> tuple[str, int]:
+    """خوانش سریع (psm 6): متن و تعداد کلماتی که تسرکت با اطمینان بالا (≥۸۰) خوانده است."""
+    res = subprocess.run(["tesseract", path, "stdout", "-l", langs, "--psm", "6", "tsv"],
+                         capture_output=True, text=True, timeout=300)
+    words, sure = [], 0
+    for row in res.stdout.splitlines()[1:]:
+        c = row.split("\t")
+        if len(c) >= 12 and c[11].strip():
+            words.append(c[11])
+            sure += float(c[10]) >= 80
+    return " ".join(words), sure
+
+
+def maybe_rotated(img) -> bool:
+    """آزمون سریع (بدون OCR): سطرهای متن عمودی‌اند؟ خطوط جدول حذف می‌شوند و نیم‌رخ ستون‌ها و سطرها مقایسه می‌شود."""
+    from .tables import _runs_mask
+
+    small = img.convert("L")
+    small.thumbnail((900, 900))
+    a = np.asarray(small) < 140
+    if a.mean() < 0.003:
+        return False
+    a = a & ~_runs_mask(a, 30, 1) & ~_runs_mask(a, 30, 0)  # خطوط جدول
+    rows = a.sum(axis=1).astype(float)
+    cols = a.sum(axis=0).astype(float)
+    sharp_r = float(np.sum(np.diff(rows) ** 2)) / max(1, a.shape[0])
+    sharp_c = float(np.sum(np.diff(cols) ** 2)) / max(1, a.shape[1])
+    return sharp_c >= 2.0 * max(sharp_r, 1e-9)
+
+
+def page_rotation(img) -> int:
+    """زاویه‌ی چرخش لازم برای صفحه‌ای که کج (۹۰ درجه) اسکن شده: 0، 90 یا 270.
+
+    خطوط جدول حذف می‌شوند؛ سطرهای متنِ باقی‌مانده در یک جهت‌اند: اگر نیم‌رخ عمودی خیلی تیزتر از نیم‌رخ افقی
+    باشد احتمالاً محتوا چرخیده است. بعد یک نسخه‌ی کوچک در هر سه جهت خوانده می‌شود: چرخش فقط وقتی پذیرفته
+    می‌شود که متن فارسی معنادارِ خیلی بیشتری بدهد (جدول‌های ستونی ساده هم نیم‌رخ تیز عمودی دارند)، و بین
+    ۹۰ و ۲۷۰ آن که کلمات مطمئن بیشتری دارد انتخاب می‌شود. تشخیص جهت خودِ تسرکت (OSD) اینجا قابل اعتماد نیست.
+    """
+    if not maybe_rotated(img):
+        return 0
+    probe = img.convert("L")
+    probe.thumbnail((1700, 1700))
+    meaning, sure = {}, {}
+    for angle in (0, 90, 270):
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            probe.rotate(angle, expand=True, fillcolor=255).save(tmp.name)
+        try:
+            text, n = _probe(tmp.name, "fas")
+            q = textnorm.quality(text)
+            meaning[angle] = q["score"] * q["words"]
+            if angle:
+                sure[angle] = n + _probe(tmp.name, "eng")[1]
+        finally:
+            os.unlink(tmp.name)
+    best = max((90, 270), key=lambda x: (sure[x], meaning[x]))
+    return best if max(meaning[90], meaning[270]) >= 2 * meaning[0] + 5 else 0
+
+
+def upright(img):
+    """تصویر صفحه، صاف‌شده اگر ۹۰ درجه چرخیده اسکن شده باشد."""
+    try:
+        angle = page_rotation(img)
+    except Exception as e:  # تشخیص جهت نباید خواندن صفحه را متوقف کند
+        log.warning("تشخیص چرخش صفحه ناموفق: %s", e)
+        return img
+    return img.rotate(angle, expand=True, fillcolor=255) if angle else img
+
+
+def _ocr_image_file(path: Path) -> str:
+    """OCR یک فایل تصویری؛ اگر کج اسکن شده باشد اول صاف می‌شود."""
+    from PIL import Image
+
+    with Image.open(path) as im:
+        img = im.convert("L")
+    fixed = upright(img)
+    if fixed is img:
+        return ocr_image(str(path))
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        fixed.save(tmp.name)
+    try:
+        return ocr_image(tmp.name)
+    finally:
+        os.unlink(tmp.name)
+
+
+def _render_gray(page, dpi: int):
+    from PIL import Image
     import pymupdf
 
+    pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY)
+    img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
+    del pix
+    return img
+
+
+def _ocr_pdf_page(page) -> str:
     longest = max(page.rect.width, page.rect.height) / 72  # اینچ
     dpi = min(OCR_DPI, int(OCR_MAX_PIXELS / max(longest, 1)))
-    pix = page.get_pixmap(dpi=max(dpi, 120), colorspace=pymupdf.csGRAY)
+    img = upright(_render_gray(page, max(dpi, 120)))
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        pix.save(tmp.name)
+        img.save(tmp.name)
+    del img
     try:
         return ocr_image(tmp.name)
     finally:
@@ -223,30 +317,52 @@ def header_text(path: Path, kind: str) -> str:
         release_memory()
 
 
-def requeue_word_pdfs() -> int:
-    """یک بار: PDFهایی که متن واقعی دارند (Word) ولی قبلاً به‌خاطر رقم‌های برعکس با OCR خوانده شدند، دوباره خوانده شوند."""
+REREAD = "2"  # با تغییر آن، اسنادی که روش خواندنشان بهتر شده یک بار دوباره خوانده می‌شوند
+
+
+def _needs_reread(path: str, pages: int, ocr_pages: int, category: str | None) -> bool:
+    import pymupdf
+
+    with pymupdf.open(path) as pdf:
+        if len(pdf[0].get_text("text").strip()) >= 100 and ocr_pages:
+            return True  # PDF متنی (Word/Excel) که با OCR خوانده شده بود
+        if category == "report" and pages > archive.ANALYZE_PAGES + 2:
+            return True  # بخش‌های گزارش ماهانه (مشکلات، برنامه‌ی ماه بعد) در صفحه‌های بعدی‌اند
+        if not ocr_pages:
+            return False
+        for i in range(min(pdf.page_count, 20)):  # صفحه‌ی کج اسکن‌شده (۹۰ درجه)
+            page = pdf[i]
+            img = _render_gray(page, max(50, min(100, int(1100 / max(page.rect.width, page.rect.height, 1) * 72))))
+            if maybe_rotated(img):
+                return True
+    return False
+
+
+def requeue_improved() -> int:
+    """یک بار: اسنادی که با روش‌های جدید بهتر خوانده می‌شوند (PDF متنی، صفحه‌ی چرخیده، گزارش بلند) دوباره در صف."""
     with db.connect() as conn:
-        if db.kv_get(conn, "word_pdf_fix") == "1":
+        if db.kv_get(conn, "reread") == REREAD:
             return 0
-        rows = conn.execute("SELECT id, path FROM documents WHERE status='ready' AND kind='pdf' AND pages <= 40 "
-                            "AND ocr_pages > 0").fetchall()
+        rows = conn.execute("SELECT id, path, pages, ocr_pages, category FROM documents WHERE status='ready' AND kind='pdf' "
+                            "AND pages <= 80 ORDER BY id").fetchall()
     ids = []
     for r in rows:
+        if worker.stopping:
+            return 0
         try:
-            import pymupdf
-
-            with pymupdf.open(r["path"]) as pdf:
-                if len(pdf[0].get_text("text").strip()) >= 100:
-                    ids.append(r["id"])
+            if _needs_reread(r["path"], r["pages"] or 0, r["ocr_pages"] or 0, r["category"]):
+                ids.append(r["id"])
         except Exception:
             continue
+        finally:
+            release_memory()
     with db.connect() as conn:
         if ids:
             conn.execute(f"UPDATE documents SET status='queued', pages_done=0, attempts=0 WHERE id IN ({','.join('?' * len(ids))})", ids)
-        db.kv_set(conn, "word_pdf_fix", "1")
-    release_memory()
+        db.kv_set(conn, "reread", REREAD)
+        db.kv_set(conn, "word_pdf_fix", "1")  # جایگزین بازخوانی قبلی
     if ids:
-        log.info("%d PDF متنی دوباره در صف خواندن قرار گرفت", len(ids))
+        log.info("%d سند برای خواندن بهتر دوباره در صف قرار گرفت", len(ids))
     return len(ids)
 
 
@@ -290,9 +406,8 @@ def read_sheet_page(path: Path, kind: str, page_no: int) -> dict[str, Any] | Non
         with pymupdf.open(path) as pdf:
             page = pdf[page_no - 1]
             longest = max(page.rect.width, page.rect.height) / 72
-            pix = page.get_pixmap(dpi=min(250, int(3300 / max(longest, 1))), colorspace=pymupdf.csGRAY)
-            img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
-            del pix
+            img = _render_gray(page, min(250, int(3300 / max(longest, 1))))
+    img = upright(img)
     try:
         return tables.read_sheet(img)
     finally:
@@ -303,13 +418,36 @@ def read_sheet_page(path: Path, kind: str, page_no: int) -> dict[str, Any] | Non
 # ───────────────────────── استخراج متن ─────────────────────────
 
 
-def _best_text(text_layer: str, ocr_fn) -> tuple[str, str]:
-    """انتخاب بهترین متن بین لایه‌ی متنی PDF و OCR. خروجی: (متن، روش)."""
+# نرم‌افزارهایی که PDF را مستقیم از متن می‌سازند (نه اسکنر): لایه‌ی متنی‌شان خودِ متن سند است
+_BORN_DIGITAL = re.compile(r"microsoft|word|excel|powerpoint|office|libreoffice|openoffice|wps|kingsoft|writer|calc|"
+                           r"google|latex|tex\b|indesign|illustrator|quarkxpress|primavera|autocad|crystal|"
+                           r"reportlab|chrome|skia|wkhtmltopdf", re.I)
+
+
+_GLUED_DIGITS = re.compile(r"(?<=\d)(?=[آ-ی])|(?<=[آ-ی])(?=\d)")
+
+
+def born_digital(pdf) -> bool:
+    """PDF ساخته‌ی Word/Excel/… (نه اسکن): از روی نرم‌افزار سازنده در مشخصات فایل."""
+    meta = pdf.metadata or {}
+    return bool(_BORN_DIGITAL.search(f"{meta.get('creator') or ''} {meta.get('producer') or ''}"))
+
+
+def _best_text(text_layer: str, ocr_fn, trusted: bool = False, lam: bool | None = None) -> tuple[str, str]:
+    """انتخاب بهترین متن بین لایه‌ی متنی PDF و OCR. خروجی: (متن، روش).
+
+    trusted: PDF ساخته‌ی Word/Excel؛ جدول‌های عدد و درصد امتیاز کیفیت را پایین می‌آورند ولی متنشان دقیق است
+    و OCR فقط خرابش می‌کند. lam: «لا»ی شکسته در کل سند (به repair_word_pdf).
+    """
     fixed, reversed_ = textnorm.fix_direction(text_layer)
-    fixed, repaired = textnorm.repair_word_pdf(fixed)  # رقم‌های برعکس و «لا»ی شکسته‌ی PDFهای Word
+    fixed, repaired = textnorm.repair_word_pdf(fixed, lam)  # رقم‌های برعکس و «لا»ی شکسته‌ی PDFهای Word
+    if trusted:  # سلول‌های Excel: «مرداد1404»، «1شرکت»، «بازه2ادامه»
+        fixed = _GLUED_DIGITS.sub(" ", fixed)
     q = textnorm.quality(fixed)
     method = "fixed" if reversed_ or repaired else "text"
     if q["words"] >= 15 and q["score"] >= GOOD_SCORE and q["bad"] <= 0.02:
+        return fixed, method
+    if trusted and len(fixed.strip()) >= 20 and q["bad"] <= 0.08 and q["stop_rev"] <= q["stop"]:
         return fixed, method
     if repaired and q["words"] >= 15 and q["score"] >= 0.85:
         return fixed, method  # PDF Word تعمیرشده: متن خودش دقیق‌تر از OCR است
@@ -335,17 +473,19 @@ def iter_pages(path: Path, kind: str) -> Iterator[tuple[int, int, Any]]:
         doc = pymupdf.open(path)
         try:
             n = doc.page_count
+            trusted = born_digital(doc)
+            lam = textnorm.lam_alef_broken("\n".join(doc[i].get_text("text") for i in range(min(n, 12)))) if trusted else None
             for i in range(n):
                 page = doc[i]
                 yield i + 1, n, lambda page=page: _best_text(
-                    page.get_text("text"), (lambda: _ocr_pdf_page(page)) if use_ocr else None
+                    page.get_text("text"), (lambda: _ocr_pdf_page(page)) if use_ocr else None, trusted, lam
                 )
         finally:
             doc.close()
     elif kind == "image":
         if not use_ocr:
             raise RuntimeError("برای خواندن تصویر، OCR (Tesseract) باید نصب باشد")
-        yield 1, 1, lambda: (ocr_image(str(path)), "ocr")
+        yield 1, 1, lambda: (_ocr_image_file(path), "ocr")
     elif kind == "docx":
         import docx
 
@@ -588,8 +728,8 @@ def process_document(doc_id: int) -> None:
     pending: list[tuple[int, int, str, str]] = []
     # صفحه‌های اول و آخر و جدول‌های مالی (برای بایگانی)؛ در ادامه‌ی کار از ذخیره‌ی قبلی خوانده می‌شوند
     saved = json.loads(d["head_text"] or "[]") if start else []
-    head_pages: list[tuple[int, str]] = [tuple(x) for x in saved if x[0] <= min(start, archive.ANALYZE_PAGES)]
-    tail_pages: list[tuple[int, str]] = [tuple(x) for x in saved if archive.ANALYZE_PAGES < x[0] <= start][-2:]
+    head_pages: list[tuple[int, str]] = [tuple(x) for x in saved if x[0] <= min(start, archive.TEXT_PAGES)]
+    tail_pages: list[tuple[int, str]] = [tuple(x) for x in saved if archive.TEXT_PAGES < x[0] <= start][-2:]
     sheets: list[dict[str, Any]] = [x for x in json.loads(d["sheets"] or "[]") if x["page"] <= start] if start else []
 
     def flush(done: int, total: int) -> None:
@@ -635,7 +775,8 @@ def process_document(doc_id: int) -> None:
                 head_pages.extend(archive.with_header([], header_text(Path(d["path"]), d["kind"])))
             except Exception:
                 log.exception("خواندن سربرگ سند %s ناموفق بود", doc_id)
-        if page_no <= archive.ANALYZE_PAGES:
+        if page_no <= archive.ANALYZE_PAGES or (
+                page_no <= archive.TEXT_PAGES and sum(len(t) for _, t in head_pages) < archive.TEXT_CHARS):
             if head_pages and head_pages[-1][0] == page_no:  # سربرگ همین صفحه
                 head_pages[-1] = (page_no, head_pages[-1][1] + "\n\n" + textnorm.clean_display(text))
             else:
@@ -674,7 +815,8 @@ def process_document(doc_id: int) -> None:
         conn.execute("UPDATE documents SET status='ready', updated_at=? WHERE id=?", (db.now_str(), doc_id))
     _vector_cache.invalidate()
     try:  # دسته‌بندی و استخراج اطلاعات برای بایگانی پروژه
-        archive.analyze(doc_id, head_pages + (tail_pages if total > archive.ANALYZE_PAGES else []), sheets)
+        archive.analyze(doc_id, head_pages + [p for p in tail_pages if p[0] > head_pages[-1][0]] if head_pages else tail_pages,
+                        sheets)
     except Exception:
         log.exception("تحلیل سند %s برای بایگانی ناموفق بود", doc_id)
 
@@ -756,7 +898,7 @@ class Worker:
         try:
             archive.upgrade()  # بعد از به‌روزرسانی برنامه: تحلیل دوباره (و خواندن دوباره‌ی اسناد خراب)
             archive.analyze_pending()  # اسنادی که هنوز تحلیل نشده‌اند
-            requeue_word_pdfs()  # PDFهای Word که قبلاً اشتباهی OCR شدند
+            requeue_improved()  # اسنادی که روش خواندنشان بهتر شده (PDF متنی، صفحه‌ی چرخیده، گزارش بلند)
             backfill_headers()  # نامه‌های قبلی بی‌شماره/بی‌تاریخ
         except Exception:
             log.exception("تحلیل اسناد قدیمی ناموفق بود")
