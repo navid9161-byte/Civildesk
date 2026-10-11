@@ -233,3 +233,16 @@ def test_page_that_keeps_crashing_is_skipped(monkeypatch):
     seen.clear()
     documents.worker.run_pending()
     assert seen == [1, 2, 3, 4, 5] and documents.get_document(d["id"])["error"] is None
+
+
+def test_requeue_word_pdfs_once():
+    from civildesk import db
+
+    d = documents.add_document(io.BytesIO(_pdf(2)), "word.pdf")
+    documents.worker.run_pending()
+    with db.connect() as conn:  # مثل نامه‌ای که با نسخه‌ی قبلی اشتباهی OCR شده بود
+        conn.execute("UPDATE documents SET ocr_pages=1 WHERE id=?", (d["id"],))
+        conn.execute("DELETE FROM kv WHERE key='word_pdf_fix'")
+    assert documents.requeue_word_pdfs() == 1
+    assert documents.get_document(d["id"])["status"] == "queued"
+    assert documents.requeue_word_pdfs() == 0

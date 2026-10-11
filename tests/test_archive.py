@@ -386,3 +386,56 @@ def test_letter_subject_without_label_and_contract_number():
     info = archive.extract(text, "letter")
     assert info["subject"]["value"].startswith("معرفی نماینده تام الاختیار")
     assert "doc_no" not in info  # شماره‌ی قرارداد در متن، شماره‌ی نامه نیست
+
+
+# متن استخراج‌شده از یک PDF ساخته‌شده با Word (ناشناس‌شده): رقم‌های عربی-هندی برعکس، «لا» ← «ال»، سطرهای تکه‌تکه
+WORD_PDF_RAW = """٨٤٣١/٥٠٤١/
+ ص
+٤١/٠7
+/٥٠٤١ 
+ 
+ 
+جناب مهندس 
+ احمدی 
+مدیر محترم 
+ سطح االرض شرکت نمونه 
+موضوع :ارسال گزارش هفتگی منتهی به ٠١ مهر ماه ٥٠٤١ پروژه "احداث راه 
+ بین چاه 
+ های 
+CG-W1
+ و 
+CG2
+ با سالم و دعای خیر 
+    با احترام بدین وسیله به پیوست گزارش هفتگی منتهی به دهم مهر ماه سال جاری پروژه "
+ احداث راه ارتباطی
+CG-W1
+ 
+ وCG2
+" موضوع قرارداد 
+ شماره
+٠73
+-٤٠٤١ - 
+ م ت
+ن ، مورد پیمان این شرکت، برای استحضار و هرگونه دستور اقدام الزم ارسال می گردد 
+ شایان توجه است که به دلیل کمبود نقدینگی در کارگاه به دلیل تاخیر در پرداخت مطالبات تا کنون، بخش هایی از پروژه دچار تاخیر گردیده که مسئولیت آن متوجه این پیمانکار نمی باشد 
+"""
+
+
+def test_word_pdf_text_is_repaired_not_ocred():
+    from civildesk import textnorm
+
+    fixed, changed = textnorm.repair_word_pdf(WORD_PDF_RAW)
+    assert changed and "1405/07" not in fixed  # تاریخ به شکل «14/07/1405»
+    assert "14/07\n/1405" in fixed and "1348/1405/" in fixed and "073\n-1404" in fixed
+    assert "با سلام" in fixed and "الارض" in fixed and "اقدام لازم" in fixed
+    calls = []
+    text, method = documents._best_text(WORD_PDF_RAW, lambda: calls.append(1) or "")
+    assert method == "fixed" and not calls  # متن خود PDF بعد از تعمیر؛ OCR لازم نشد
+
+    info = archive.extract(archive._prep(text), "letter")
+    v = {k: x["value"] for k, x in info.items() if isinstance(x, dict)}
+    assert v["doc_no"] == "1405/1348/ص" and v["doc_date"] == "1405/07/14"
+    assert v["to"] == "جناب مهندس احمدی"
+    assert v["subject"].startswith("ارسال گزارش هفتگی منتهی به 10 مهر ماه 1405")
+    summary = archive.letter_summary({"info": info})
+    assert "شایان توجه است که به دلیل کمبود نقدینگی" in summary
