@@ -66,3 +66,16 @@ def test_import_csv_with_income_and_expense_columns():
     csv_text = "تاریخ,شرح,واریز (ریال),برداشت (ریال)\n1405/07/01,حقوق مهر,900000000,\n1405/07/02,اجاره,,300000000\n"
     r = importer.run(csv_text.encode("utf-8"), "bank.csv", commit=True)
     assert r["new"] == 2 and r["income"] == 900000000 and r["expense"] == 300000000
+
+
+def test_finance_summary_by_month_and_category():
+    from civildesk import services
+
+    importer.run(_xlsx(), "هزینه‌ها.xlsx", commit=True)
+    with db.connect() as conn:
+        s = services.finance_summary(conn, "1405/06/01", "1405/06/30")
+    assert s["count"] == 6 and s["first"] == "1405/06/01" and s["last"] == "1405/06/06"
+    months = {(m["month"], m["kind"]): m["total"] for m in s["by_month"]}
+    assert months[("1405/06", "income")] == 30000000
+    cats = {(c["kind"], c["category"]): c["total"] for c in s["by_category"]}
+    assert cats[("expense", "خوراک")] == 5000000

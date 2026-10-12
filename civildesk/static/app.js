@@ -133,6 +133,7 @@ async function render() {
     else if (state.tab === "docs") await renderDocs(view);
     else if (state.tab === "archive") await renderArchive(view);
     else if (state.tab === "letters") await renderLetters(view);
+    else if (state.tab === "transactions" && !financeState.detail) await renderFinance(view);
     else await renderEntity(view, state.tab);
   } catch (e) {
     view.innerHTML = `<div class="card error">${esc(e.message)}</div>`;
@@ -353,7 +354,7 @@ async function renderEntity(view, entity) {
   view.innerHTML = `
     <div class="toolbar">
       <button class="btn primary" id="add">+ ${esc(s.label)} جدید</button>
-      ${entity === "transactions" ? `<button class="btn" id="tx-import">⬆️ ورود از اکسل</button>` : ""}
+      ${entity === "transactions" ? `<button class="btn" id="tx-back">📊 بازگشت به خلاصه</button><button class="btn" id="tx-import">⬆️ ورود از اکسل</button>` : ""}
       <input type="search" id="f-search" placeholder="جستجو…" value="${esc(f.search)}">
       ${hasProject ? `<select id="f-project"><option value="">همه‌ی پروژه‌ها</option>${PROJECTS.map((p) => `<option value="${p.id}" ${String(p.id) === String(f.project_id) ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>` : ""}
       ${hasStatus ? `<select id="f-status"><option value="">${entity === "tasks" ? "وضعیت: همه" : "همه‌ی وضعیت‌ها"}</option>${Object.entries(statusField.choices).map(([k, l]) => `<option value="${k}" ${f.status === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>` : ""}
@@ -363,12 +364,154 @@ async function renderEntity(view, entity) {
     <div class="list">${rows.length ? rows.map((r) => itemHTML(entity, r, META.today)).join("") : `<div class="card empty">موردی پیدا نشد.</div>`}</div>`;
 
   $("#add").onclick = () => openForm(entity, null);
-  if (entity === "transactions") $("#tx-import").onclick = () => importTransactions(view, entity);
+  if (entity === "transactions") {
+    $("#tx-import").onclick = () => importTransactions(view, entity);
+    $("#tx-back").onclick = () => { financeState.detail = false; render(); };
+  }
   let t;
   $("#f-search").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { f.search = e.target.value; renderEntity(view, entity).then(() => { const el = $("#f-search"); el.focus(); el.setSelectionRange(el.value.length, el.value.length); }); }, 300); };
   if (hasProject) $("#f-project").onchange = (e) => { f.project_id = e.target.value; render(); };
   if (hasStatus) $("#f-status").onchange = (e) => { f.status = e.target.value; render(); };
   if (entity === "tasks") $("#f-open").onchange = (e) => { f.open = e.target.checked; render(); };
+}
+
+// ───────── خلاصه‌ی مالی: دسته‌ها، نمودار دایره‌ای و روند ماهانه (ریز تراکنش‌ها با یک دکمه) ─────────
+const financeState = { detail: false, period: "all" };
+const SERIES = 5; // بیشتر از ۵ دسته در نمودار دایره‌ای ← «سایر» (بقیه در جدول)
+
+function periodRange(key) {
+  const [y, m] = META.today.split("/").map(Number);
+  const pad = (n) => String(n).padStart(2, "0");
+  const back = (k) => { let yy = y, mm = m - k; while (mm < 1) { mm += 12; yy--; } return [yy, mm]; };
+  if (key === "month") return [`${y}/${pad(m)}/01`, META.today];
+  if (key === "prev") { const [yy, mm] = back(1); return [`${yy}/${pad(mm)}/01`, `${yy}/${pad(mm)}/31`]; }
+  if (key === "3m") { const [yy, mm] = back(2); return [`${yy}/${pad(mm)}/01`, META.today]; }
+  if (key === "year") return [`${y}/01/01`, META.today];
+  return [null, null];
+}
+
+async function renderFinance(view) {
+  const f = (state.filters.transactions ||= { search: "", status: "", project_id: "", open: false });
+  const [from, to] = periodRange(financeState.period);
+  const q = new URLSearchParams();
+  if (from) q.set("date_from", from);
+  if (to) q.set("date_to", to);
+  if (f.project_id) q.set("project_id", f.project_id);
+  const d = await api(`/api/finance/summary?${q}`);
+  const cats = (kind) => d.by_category.filter((c) => c.kind === kind);
+  const exp = cats("expense"), inc = cats("income");
+  const periods = [["month", "این ماه"], ["prev", "ماه قبل"], ["3m", "۳ ماه اخیر"], ["year", "امسال"], ["all", "همه"]];
+  view.innerHTML = `
+    <div class="toolbar">
+      <button class="btn primary" id="add">+ تراکنش جدید</button>
+      <button class="btn" id="tx-import">⬆️ ورود از اکسل</button>
+      <select id="f-project"><option value="">همه‌ی پروژه‌ها و شخصی</option>${PROJECTS.map((p) => `<option value="${p.id}" ${String(p.id) === String(f.project_id) ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
+    </div>
+    <div class="chips">${periods.map(([k, l]) => `<button class="chip ${financeState.period === k ? "active" : ""}" data-period="${k}">${l}</button>`).join("")}
+      ${d.first ? `<span class="muted small fin-span">${faDigits(d.first)} تا ${faDigits(d.last)}</span>` : ""}</div>
+    <div class="stats">
+      <div class="stat good">${ico("transactions")}<div><div class="v" title="${num(d.income)} ${META.currency}">${shortMoney(d.income)}</div><div class="l">دریافتی (${META.currency})</div></div></div>
+      <div class="stat bad">${ico("transactions")}<div><div class="v" title="${num(d.expense)} ${META.currency}">${shortMoney(d.expense)}</div><div class="l">هزینه (${META.currency})</div></div></div>
+      <div class="stat"><div><div class="v" title="${num(d.balance)} ${META.currency}">${d.balance < 0 ? "−" : ""}${shortMoney(Math.abs(d.balance))}</div><div class="l">مانده</div></div></div>
+      <div class="stat"><div><div class="v">${num(d.count)}</div><div class="l">تعداد تراکنش</div></div></div>
+    </div>
+    ${d.count ? `
+      ${catCard("💸 هزینه‌ها به تفکیک دسته", exp, d.expense, "expense")}
+      ${inc.length ? catCard("💰 دریافتی‌ها به تفکیک دسته", inc, d.income, "income") : ""}
+      ${monthCard(d.by_month)}`
+    : `<div class="card empty">برای این بازه تراکنشی ثبت نشده است.</div>`}
+    <div class="card fin-detail">
+      <div><b>📋 ریز تراکنش‌ها</b><div class="muted small">فهرست کامل دریافت‌ها و هزینه‌ها، با جستجو و ویرایش هر ردیف</div></div>
+      <button class="btn primary" id="tx-detail">دیدن ریز تراکنش‌ها${d.count ? ` (${num(d.count)})` : ""}</button>
+    </div>`;
+  $("#add").onclick = () => openForm("transactions", null);
+  $("#tx-import").onclick = () => importTransactions(view, "transactions");
+  $("#tx-detail").onclick = () => { financeState.detail = true; f.search = ""; render(); };
+  $("#f-project").onchange = (e) => { f.project_id = e.target.value; render(); };
+  view.querySelectorAll("[data-period]").forEach((b) => b.onclick = () => { financeState.period = b.dataset.period; render(); });
+  view.querySelectorAll("[data-cat]").forEach((r) => r.onclick = () => {  // ریز همان دسته
+    financeState.detail = true;
+    f.search = r.dataset.cat === "بدون دسته" ? "" : r.dataset.cat;
+    render();
+  });
+}
+
+function catCard(title, rows, total, kind) {
+  const top = rows.slice(0, SERIES);
+  const rest = rows.slice(SERIES).reduce((a, r) => a + r.total, 0);
+  const slices = top.map((r, i) => ({ label: r.category, value: r.total, color: `var(--series-${i + 1})` }));
+  if (rest > 0) slices.push({ label: "سایر", value: rest, color: "var(--series-other)" });
+  const max = rows[0]?.total || 1;
+  const pct = (v) => (total ? Math.round((1000 * v) / total) / 10 : 0);
+  return `<div class="card fin-card">
+    <h3>${title} <span class="count">${num(rows.length)} دسته</span></h3>
+    <div class="fin-grid">
+      <div class="donut-wrap">${donutSVG(slices, total)}
+        <ul class="donut-legend">${slices.map((sl) => `<li><i style="background:${sl.color}"></i><span>${esc(sl.label)}</span><b>${faDigits(pct(sl.value))}٪</b></li>`).join("")}</ul>
+      </div>
+      <div class="table-wrap"><table class="fin-table">
+        <thead><tr><th>دسته</th><th>مبلغ (${META.currency})</th><th>سهم</th><th class="c-n">تعداد</th></tr></thead>
+        <tbody>${rows.map((r) => `<tr data-cat="${esc(r.category)}" title="دیدن ریز «${esc(r.category)}»">
+          <td>${esc(r.category)}</td>
+          <td><div class="bar-cell"><span class="bar ${kind}" style="width:${Math.max(2, (100 * r.total) / max)}%"></span><span class="bar-v">${num(r.total)}</span></div></td>
+          <td>${faDigits(pct(r.total))}٪</td><td class="c-n">${num(r.n)}</td></tr>`).join("")}</tbody>
+        <tfoot><tr><td>جمع</td><td>${num(total)}</td><td>۱۰۰٪</td><td class="c-n">${num(rows.reduce((a, r) => a + r.n, 0))}</td></tr></tfoot>
+      </table></div>
+    </div>
+  </div>`;
+}
+
+function donutSVG(slices, total) {
+  // حلقه با فاصله‌ی ۲ پیکسلی بین بخش‌ها؛ جمع در مرکز
+  const R = 70, W = 26, C = 2 * Math.PI * R, GAP = slices.length > 1 ? 2 : 0;
+  let off = 0;
+  const arcs = slices.map((sl) => {
+    const len = total ? (C * sl.value) / total : 0;
+    const dash = Math.max(0, len - GAP);
+    const el = `<circle class="donut-seg" r="${R}" cx="100" cy="100" fill="none" stroke="${sl.color}" stroke-width="${W}"
+      stroke-dasharray="${dash} ${C - dash}" stroke-dashoffset="${-off}" transform="rotate(-90 100 100)" tabindex="0">
+      <title>${esc(sl.label)}: ${num(sl.value)} ${META.currency} (${faDigits(Math.round((1000 * sl.value) / (total || 1)) / 10)}٪)</title></circle>`;
+    off += len;
+    return el;
+  }).join("");
+  return `<svg class="donut" viewBox="0 0 200 200" role="img" aria-label="نمودار دایره‌ای سهم دسته‌ها">
+    ${arcs}<text x="100" y="96" text-anchor="middle" class="donut-t">${shortMoney(total)}</text>
+    <text x="100" y="118" text-anchor="middle" class="donut-s">${META.currency}</text></svg>`;
+}
+
+function monthCard(byMonth) {
+  const months = [...new Set(byMonth.map((r) => r.month))].sort();
+  if (!months.length) return "";
+  const val = (m, k) => byMonth.find((r) => r.month === m && r.kind === k)?.total || 0;
+  const rows = months.map((m) => ({ m, inc: val(m, "income"), exp: val(m, "expense") }));
+  const label = (m) => { const [y, mm] = m.split("/"); return `${MONTHS_FA[Number(mm) - 1]} ${faDigits(y)}`; };
+  const max = Math.max(...rows.map((r) => Math.max(r.inc, r.exp)), 1);
+  const W = Math.round(Math.min(640, Math.max(300, window.innerWidth - 56))), H = 220, L = 8, B = 30, T = 12;
+  const band = (W - 2 * L) / rows.length, bw = Math.min(28, band / 3);
+  const Y = (v) => H - B - ((H - B - T) * v) / max;
+  const bar = (x, v, cls, tip) => {
+    if (!v) return "";
+    const y = Y(v), h = H - B - y, r = Math.min(4, h, bw / 2);
+    return `<path class="${cls}" d="M${x},${H - B} V${y + r} q0,-${r} ${r},-${r} H${x + bw - r} q${r},0 ${r},${r} V${H - B} Z" tabindex="0"><title>${esc(tip)}</title></path>`;
+  };
+  // ترتیب زمانی راست‌به‌چپ (اولین ماه سمت راست)
+  const bars = rows.map((r, i) => {
+    const cx = W - L - band * (i + 0.5);
+    return bar(cx - bw - 1, r.exp, "mb-exp", `${label(r.m)} — هزینه: ${num(r.exp)} ${META.currency}`)
+      + bar(cx + 1, r.inc, "mb-inc", `${label(r.m)} — دریافتی: ${num(r.inc)} ${META.currency}`)
+      + `<text x="${cx}" y="${H - B + 18}" text-anchor="middle" class="ch-ax">${label(r.m)}</text>`;
+  }).join("");
+  return `<div class="card fin-card">
+    <h3>📅 روند ماهانه <span class="count">${META.currency}</span></h3>
+    <div class="ch-legend"><span><i class="lg-box mb-inc-bg"></i>دریافتی</span><span><i class="lg-box mb-exp-bg"></i>هزینه</span></div>
+    <svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="نمودار ماهانه‌ی دریافتی و هزینه">
+      <line x1="${L}" x2="${W - L}" y1="${H - B}" y2="${H - B}" class="ch-grid"/>${bars}</svg>
+    <div class="table-wrap"><table class="fin-table">
+      <thead><tr><th>ماه</th><th>دریافتی</th><th>هزینه</th><th>مانده</th></tr></thead>
+      <tbody>${rows.map((r) => `<tr><td>${label(r.m)}</td><td title="${num(r.inc)}">${shortMoney(r.inc)}</td><td title="${num(r.exp)}">${shortMoney(r.exp)}</td>
+        <td class="${r.inc - r.exp < 0 ? "neg" : ""}" title="${num(r.inc - r.exp)}">${r.inc - r.exp < 0 ? "−" : ""}${shortMoney(Math.abs(r.inc - r.exp))}</td></tr>`).join("")}</tbody>
+    </table></div>
+  </div>`;
 }
 
 // ───────── ورود دریافت و پرداخت‌های گذشته از Excel/CSV ─────────
@@ -427,7 +570,7 @@ function importTransactions(view, entity) {
           const done = await send(true);
           dlg.close();
           toast(`${num(done.new)} ردیف${done.notes ? ` و ${num(done.notes)} یادداشت` : ""} ثبت شد ✔`);
-          renderEntity(view, entity);
+          render();
         } catch (err) { go.disabled = false; go.textContent = "ثبت"; toast(err.message); }
       };
     } catch (err) {

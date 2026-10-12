@@ -545,3 +545,54 @@ svg.chart { width: 100%; height: auto; max-width: 720px; display: block; overflo
 .alert-row .grow { text-align: start; }
 .imp-row { display: flex; gap: 10px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
 .imp-row select, .imp-row input { font: inherit; }
+
+/* ───────── خلاصه‌ی مالی ───────── */
+:root {
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100; --series-5: #e87ba4;
+  --series-other: #9a9a94; --fin-inc: #2a78d6; --fin-exp: #eb6834;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-5: #d55181;
+    --series-other: #75746e; --fin-inc: #3987e5; --fin-exp: #d95926;
+  }
+}
+.fin-span { align-self: center; margin-inline-start: 6px; }
+.fin-grid { display: grid; grid-template-columns: minmax(220px, 300px) 1fr; gap: 18px; align-items: start; }
+@media (max-width: 760px) { .fin-grid { grid-template-columns: 1fr; } }
+.donut-wrap { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+svg.donut { width: 100%; max-width: 220px; height: auto; }
+.donut-seg { cursor: pointer; transition: stroke-width .15s; }
+.donut-seg:hover, .donut-seg:focus { stroke-width: 30; outline: none; }
+.donut-t { fill: var(--text); font-size: 17px; font-weight: 700; font-family: inherit; }
+.donut-s { fill: var(--muted); font-size: 12px; font-family: inherit; }
+.donut-legend { list-style: none; margin: 0; padding: 0; width: 100%; display: grid; gap: 5px; font-size: .88rem; }
+.donut-legend li { display: flex; align-items: center; gap: 8px; }
+.donut-legend li span { flex: 1; color: var(--text); }
+.donut-legend li b { color: var(--muted); font-weight: 600; }
+.donut-legend i { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+.fin-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+.fin-table th { text-align: start; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.fin-table td { padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.fin-table tbody tr[data-cat] { cursor: pointer; }
+.fin-table tbody tr[data-cat]:hover { background: var(--card-2); }
+.fin-table tfoot td { font-weight: 700; border-bottom: 0; }
+.fin-table td.neg { color: var(--danger); }
+.bar-cell { position: relative; min-width: 150px; }
+.bar-cell .bar { position: absolute; inset-block: 2px; inset-inline-start: 0; border-radius: 4px; opacity: .22; }
+.bar-cell .bar.expense { background: var(--fin-exp); }
+.bar-cell .bar.income { background: var(--fin-inc); }
+.bar-cell .bar-v { position: relative; padding-inline-start: 6px; }
+.mb-inc { fill: var(--fin-inc); }
+.mb-exp { fill: var(--fin-exp); }
+.mb-inc:hover, .mb-exp:hover { opacity: .8; }
+.lg-box { display: inline-block; width: 12px !important; height: 12px !important; border-radius: 3px; border: 0 !important; }
+.mb-inc-bg { background: var(--fin-inc); }
+.mb-exp-bg { background: var(--fin-exp); }
+.fin-detail { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+@media (max-width: 480px) {
+  .fin-table { font-size: .82rem; }
+  .fin-table .c-n { display: none; }  /* ستون تعداد */
+  .fin-table th, .fin-table td { padding: 6px 4px; white-space: normal; }
+  .bar-cell { min-width: 110px; }
+}

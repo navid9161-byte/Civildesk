@@ -145,6 +145,12 @@ def finance_summary(
         f"SELECT kind, COALESCE(category,'بدون دسته') category, SUM(amount) total, COUNT(*) n "
         f"FROM transactions WHERE {w} GROUP BY kind, category ORDER BY total DESC", params
     )]
+    by_month = [dict(r) for r in conn.execute(
+        f"SELECT substr(tx_date,1,7) month, kind, SUM(amount) total, COUNT(*) n "
+        f"FROM transactions WHERE {w} GROUP BY month, kind ORDER BY month", params
+    )]
+    count = conn.execute(f"SELECT COUNT(*) FROM transactions WHERE {w}", params).fetchone()[0]
+    span = conn.execute(f"SELECT MIN(tx_date), MAX(tx_date) FROM transactions WHERE {w}", params).fetchone()
     wt, params_t = where_for("t.")
     by_project = [dict(r) for r in conn.execute(
         f"SELECT COALESCE(p.name,'بدون پروژه') project, t.kind, SUM(t.amount) total FROM transactions t "
@@ -160,7 +166,8 @@ def finance_summary(
     return {
         "from": date_from, "to": date_to, "project_id": project_id,
         "income": income, "expense": expense, "balance": income - expense,
-        "by_category": by_cat, "by_project": by_project,
+        "by_category": by_cat, "by_project": by_project, "by_month": by_month, "count": count,
+        "first": span[0], "last": span[1],
         "invoices_receivable": receivable,
         "currency": settings.currency,
     }
