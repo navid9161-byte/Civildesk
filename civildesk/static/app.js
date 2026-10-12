@@ -839,6 +839,8 @@ async function renderArchive(view) {
   drop.addEventListener("dragleave", () => drop.classList.remove("over"));
   drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); upload(e.dataTransfer.files, view, pid || null, renderArchive); });
 
+  const dm = $("#draft-month");
+  if (dm) dm.onchange = () => { $("#draft-monthly").href = `/api/drafts/${p.id}/monthly?month=${dm.value}`; };
   const sug = $("#arch-apply");
   if (sug) sug.onclick = async () => {
     const body = Object.fromEntries(s.suggestions.map((x) => [x.field, x.value]));
@@ -937,7 +939,7 @@ function summaryHTML(s) {
     ? `<div class="glance">${p.items.map(sentence).join(" ")}</div>`
     : `<section class="${p.kind}"><h4>${esc(faDigits(p.title))}</h4><p>${p.items.map(sentence).join(" ")}</p></section>`).join("");
 
-  return `${story ? `<div class="card story">
+  return `${controlHTML(s)}${story ? `<div class="card story">
     <h3>📖 روایت پروژه <span class="count">از روی ${num(s.documents.filter((d) => d.status === "ready").length)} سند</span></h3>
     ${story}
   </div>` : ""}
@@ -949,6 +951,80 @@ function summaryHTML(s) {
     ${rows.join("")}
     <p class="muted small">⚠️ این اطلاعات خودکار از متن اسناد خوانده شده؛ به‌خصوص در اسناد اسکن‌شده، اعداد را با سند اصلی چک کنید.</p>
   </div>`;
+}
+
+// ───────── کنترل پروژه: هشدارها، نمودار کارکرد، نامه‌های بی‌پاسخ، پیش‌نویس‌ها ─────────
+const ALERT_ICON = { red: "⛔", amber: "⚠️", info: "ℹ️" };
+const MONTHS_FA = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"];
+
+function controlHTML(s) {
+  const pid = s.project?.id;
+  const alerts = (s.alerts || []).map((a) => `<div class="row alert-row ${a.level}">
+      <span class="a-ico" aria-label="${{ red: "مهم", amber: "توجه", info: "اطلاع" }[a.level]}">${ALERT_ICON[a.level]}</span>
+      <span class="grow">${esc(faDigits(a.text))}</span>${a.doc_id ? srcLink(a) : ""}</div>`).join("");
+  const waiting = (s.unanswered || []).filter((x) => x.waiting != null).slice(0, 6).map((x) => `<div class="row">
+      <span class="badge ${x.waiting >= 14 ? "amber" : "gray"}">${num(x.waiting)} روز</span>
+      <span class="grow">${esc(faDigits(x.subject || x.title))}${x.doc_no ? ` <small class="muted">· ${esc(faDigits(x.doc_no))}</small>` : ""}</span>
+      <a href="#" class="src-link" data-brief="${x.id}" title="خلاصه‌ی نامه">📋</a></div>`).join("");
+  const months = [];
+  if (pid) {
+    let [y, m] = s.today.split("/").map(Number);
+    for (let i = 0; i < 6; i++) {
+      months.push(`${y}/${String(m).padStart(2, "0")}`);
+      if (--m === 0) { m = 12; y--; }
+    }
+  }
+  const drafts = pid ? `<h4>📝 پیش‌نویس آماده (Word)</h4>
+    <div class="drafts no-print">
+      ${s.invoices.length ? `<a class="btn" href="/api/drafts/${pid}/invoice">✉️ نامه‌ی ارسال صورت‌وضعیت آخر</a>` : ""}
+      <a class="btn" href="/api/drafts/${pid}/extension">⏳ درخواست تمدید مدت (با مستندات تأخیر)</a>
+      <span class="draft-month"><select id="draft-month" aria-label="ماه گزارش">${months.map((k, i) => {
+        const [yy, mm] = k.split("/");
+        return `<option value="${k}" ${i === 1 ? "selected" : ""}>${MONTHS_FA[Number(mm) - 1]} ${faDigits(yy)}</option>`;
+      }).join("")}</select><a class="btn" id="draft-monthly" href="/api/drafts/${pid}/monthly?month=${months[1]}">📊 گزارش ماهانه</a></span>
+    </div>
+    <p class="muted small">پیش‌نویس‌ها از روی اسناد بایگانی ساخته می‌شوند؛ جاهای «[…]» را کامل کنید.</p>` : "";
+  if (!alerts && !waiting && !drafts && !s.chart) return "";
+  return `<div class="card control">
+    <h3>🚦 کنترل پروژه <span class="count">به‌روز با هر سند جدید</span></h3>
+    ${alerts ? `<div class="alerts">${alerts}</div>` : `<p class="muted">هشدار مهمی نیست ✔</p>`}
+    ${s.chart ? chartHTML(s.chart) : ""}
+    ${waiting ? `<h4>⏳ نامه‌های منتظر پاسخ</h4>${waiting}` : ""}
+    ${drafts}
+  </div>`;
+}
+
+function chartHTML(c) {
+  // کارکرد تجمعی تأییدشده در برابر برنامه‌ی خطی (شروع ← پایان پیمان، صفر ← مبلغ قرارداد)
+  // عرض نمودار به اندازه‌ی صفحه تا نوشته‌ها در گوشی ریز نشوند
+  const W = Math.round(Math.min(640, Math.max(300, window.innerWidth - 56))), H = W < 480 ? 200 : 230, L = 44, R = 12, T = 14, B = 34;
+  const pts = c.points;
+  const maxX = Math.max(c.end_x || 0, c.today_x || 0, ...pts.map((p) => p.x), 1);
+  const maxY = Math.max(c.contract || 0, ...pts.map((p) => p.value)) * 1.05;
+  const X = (x) => L + ((W - L - R) * x) / maxX;
+  const Y = (v) => H - B - ((H - T - B) * v) / maxY;
+  const grid = [0, 0.25, 0.5, 0.75, 1].map((f) => {
+    const v = (c.contract || maxY / 1.05) * f;
+    return `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" class="ch-grid"/>
+      <text x="${L - 6}" y="${Y(v) + 4}" class="ch-ax" text-anchor="end">${c.contract ? `${faDigits(f * 100)}٪` : shortMoney(v)}</text>`;
+  }).join("");
+  const plan = c.contract && c.end_x ? `<line x1="${X(0)}" y1="${Y(0)}" x2="${X(c.end_x)}" y2="${Y(c.contract)}" class="ch-plan"/>` : "";
+  const line = pts.length > 1 ? `<polyline class="ch-line" points="${pts.map((p) => `${X(p.x)},${Y(p.value)}`).join(" ")}"/>` : "";
+  const dots = pts.map((p) => {
+    const pct = c.contract ? ` (${faDigits(Math.round((1000 * p.value) / c.contract) / 10)}٪ قرارداد)` : "";
+    const tip = `صورت‌وضعیت ${p.no ? faDigits(p.no) : ""} · ${faDigits(p.date)}\nکارکرد تجمعی: ${shortMoney(p.value)}${pct}`;
+    return `<g class="ch-pt" tabindex="0"><circle cx="${X(p.x)}" cy="${Y(p.value)}" r="12" class="ch-hit"/>
+      <circle cx="${X(p.x)}" cy="${Y(p.value)}" r="4.5" class="ch-dot"/><title>${esc(tip)}</title></g>`;
+  }).join("");
+  const today = c.today_x != null && c.today_x >= 0 ? `<line x1="${X(c.today_x)}" x2="${X(c.today_x)}" y1="${T}" y2="${H - B}" class="ch-today"/>
+    <text x="${X(c.today_x)}" y="${H - B + 14}" class="ch-ax" text-anchor="middle">امروز</text>` : "";
+  const ends = `<text x="${X(0)}" y="${H - B + 14}" class="ch-ax" text-anchor="start">${faDigits(c.start || pts[0].date)}</text>`
+    + (c.end && c.end_x ? `<text x="${X(c.end_x)}" y="${H - B + 28}" class="ch-ax" text-anchor="end">پایان ${faDigits(c.end)}</text>` : "");
+  return `<h4>📈 کارکرد تجمعی در برابر برنامه</h4>
+    <div class="ch-legend"><span><i class="lg-line"></i>کارکرد تأییدشده (صورت‌وضعیت‌ها)</span>${plan ? `<span><i class="lg-plan"></i>برنامه‌ی خطی تا پایان مدت</span>` : ""}</div>
+    <svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="نمودار کارکرد تجمعی" direction="ltr">
+      ${grid}${plan}${today}${line}${dots}${ends}
+    </svg>`;
 }
 
 function shortMoney(v) {
@@ -1121,7 +1197,8 @@ function editDocMeta(d) {
     const pid = el.project_id.value ? Number(el.project_id.value) : null;
     if (pid !== (d.project_id ?? null)) body.project_id = pid;
     try {
-      if (Object.keys(body).length) await api(`/api/documents/${d.id}`, { method: "PATCH", body });
+      const res = Object.keys(body).length ? await api(`/api/documents/${d.id}`, { method: "PATCH", body }) : null;
+      if (res?.learned?.length) setTimeout(() => toast("یاد گرفتم ✔ — اسناد مشابه هم با همین الگو خوانده می‌شوند"), 1600);
       modal.close();
       toast("ذخیره شد ✔");
       render();
@@ -1132,7 +1209,7 @@ function editDocMeta(d) {
 
 
 // ───────────────────────── بایگانی نامه‌ها ─────────────────────────
-const lettersState = { q: "", cat: "", poll: null, data: null };
+const lettersState = { q: "", cat: "", poll: null, data: null, open: false };
 
 async function renderLetters(view) {
   const ov = await api("/api/archive");
@@ -1178,8 +1255,9 @@ async function renderLetters(view) {
       <div class="toolbar no-print">
         <input type="search" id="l-q" placeholder="جستجو در شماره، موضوع، گیرنده و متن خلاصه…" value="${esc(lettersState.q)}">
       </div>
-      ${hasOrders ? `<div class="chips no-print">${[["", "همه"], ["letter", "✉️ نامه"], ["order", "📣 ابلاغیه / دستور کار"]].map(([k, l]) =>
-        `<button class="chip ${lettersState.cat === k ? "active" : ""}" data-lcat="${k}">${l}</button>`).join("")}</div>` : ""}
+      <div class="chips no-print">${(hasOrders ? [["", "همه"], ["letter", "✉️ نامه"], ["order", "📣 ابلاغیه / دستور کار"]] : [["", "همه"]]).map(([k, l]) =>
+        `<button class="chip ${!lettersState.open && lettersState.cat === k ? "active" : ""}" data-lcat="${k}">${l}</button>`).join("")}
+        ${data.unanswered ? `<button class="chip ${lettersState.open ? "active" : ""}" id="l-open">⏳ منتظر پاسخ <span class="count">${num(data.unanswered)}</span></button>` : ""}</div>
       <div id="l-list"></div>
     </div>`;
   renderLetterList();
@@ -1189,7 +1267,9 @@ async function renderLetters(view) {
     localStorageSet("archive_pid", archiveState.pid);
     renderLetters(view);
   });
-  view.querySelectorAll("[data-lcat]").forEach((b) => b.onclick = () => { lettersState.cat = b.dataset.lcat; renderLetters(view); });
+  view.querySelectorAll("[data-lcat]").forEach((b) => b.onclick = () => { lettersState.cat = b.dataset.lcat; lettersState.open = false; renderLetters(view); });
+  const lo = $("#l-open");
+  if (lo) lo.onclick = () => { lettersState.open = !lettersState.open; renderLetters(view); };
   $("#l-print").onclick = () => window.print();
   $("#l-q").oninput = (e) => { lettersState.q = e.target.value; renderLetterList(); };
   const input = $("#files");
@@ -1210,10 +1290,22 @@ async function renderLetters(view) {
   }
 }
 
+function threadHTML(x) {
+  // زنجیره‌ی نامه: پاسخِ کدام نامه است، با کدام نامه پاسخ گرفته، یا چند روز منتظر پاسخ است
+  const link = (r) => `<a href="#" class="l-link" data-lbrief="${r.id}" title="${esc(faDigits(r.subject || ""))}">${esc(faDigits(r.no || r.date || "نامه"))}</a>`;
+  const parts = [];
+  if (x.reply_to?.length) parts.push(`<span class="thread">↩ در پاسخ/پیرو ${x.reply_to.map(link).join("، ")}</span>`);
+  if (x.replies?.length) parts.push(`<span class="thread ok">✔ پاسخ: ${x.replies.map(link).join("، ")}</span>`);
+  if (x.missing?.length) parts.push(`<span class="thread muted" title="این نامه به آن ارجاع داده ولی در بایگانی نیست">📭 ارجاع به ${x.missing.map((m) => esc(faDigits(m.no))).join("، ")} (در بایگانی نیست)</span>`);
+  if (x.waiting != null) parts.push(`<span class="badge ${x.waiting >= 14 ? "amber" : "gray"}">⏳ ${num(x.waiting)} روز بدون پاسخ</span>`);
+  return parts.length ? `<div class="l-thread">${parts.join("")}</div>` : "";
+}
+
 function renderLetterList() {
   const data = lettersState.data;
   const nq = normFa(lettersState.q.trim());
   const rows = data.letters.filter((x) => (!lettersState.cat || x.category === lettersState.cat)
+    && (!lettersState.open || x.waiting != null)
     && (!nq || normFa([x.subject, x.title, x.doc_no, x.to, x.from, x.summary].join(" ")).includes(nq)));
   if (!rows.length) {
     $("#l-list").innerHTML = `<div class="empty">${data.letters.length ? "نامه‌ای با این جستجو پیدا نشد." : "هنوز نامه‌ای در این بایگانی نیست؛ از کادر بالا اضافه کنید."}</div>`;
@@ -1242,6 +1334,7 @@ function renderLetterList() {
           ${x.deadline ? `<span class="badge ${x.late ? "red" : "amber"}">مهلت ${faDigits(x.deadline)}${x.late ? " (گذشته)" : ""}</span>` : ""}
           ${x.ocr ? `<span class="muted" title="از روی تصویر خوانده شده">OCR</span>` : ""}
         </div>
+        ${threadHTML(x)}
         <div class="l-sum" title="${esc(faDigits(x.summary))}">${busy
           ? `⏳ ${x.status === "processing" && x.pages ? `در حال خواندن… ${num(Math.round((100 * x.pages_done) / x.pages))}٪` : "در صف خواندن…"}`
           : x.summary ? esc(faDigits(x.summary)) : `<span class="muted">${x.error ? esc(x.error) : "متن این نامه برای خلاصه خوانا نبود؛ فایل را باز کنید."}</span>`}</div>
@@ -1255,6 +1348,11 @@ function renderLetterList() {
   }
   $("#l-list").innerHTML = html;
   $("#l-list").querySelectorAll(".l-sum").forEach((el) => el.onclick = () => el.classList.toggle("open"));
+  $("#l-list").querySelectorAll("[data-lbrief]").forEach((a) => a.onclick = (e) => {
+    e.preventDefault();
+    const row = $("#l-list").querySelector(`[data-ledit="${a.dataset.lbrief}"]`)?.closest(".letter-row");
+    if (row) { row.scrollIntoView({ behavior: "smooth", block: "center" }); row.classList.add("flash"); setTimeout(() => row.classList.remove("flash"), 1600); }
+  });
   $("#l-list").querySelectorAll("[data-ledit]").forEach((b) => b.onclick = () => editDocMeta(data.letters.find((x) => x.id === Number(b.dataset.ledit))));
 }
 

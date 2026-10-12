@@ -221,8 +221,8 @@ def documents_reprocess(doc_id: int):
 @app.patch("/api/documents/{doc_id}")
 def documents_update(doc_id: int, data: dict[str, Any]):
     """ویرایش عنوان، پروژه، دسته، تاریخ، شماره و موضوع سند (اصلاح دستی در تحلیل دوباره حفظ می‌شود)."""
-    archive.update_meta(doc_id, data)
-    return documents.get_document(doc_id)
+    learned = archive.update_meta(doc_id, data)
+    return {**documents.get_document(doc_id), "learned": learned}
 
 
 @app.get("/api/documents/{doc_id}/file")
@@ -255,6 +255,17 @@ def archive_project(project_id: int):
 def archive_to_invoice(doc_id: int):
     """ثبت صورت‌وضعیت بایگانی‌شده در بخش «صورت‌وضعیت‌ها»."""
     return archive.to_invoice_record(doc_id)
+
+
+@app.get("/api/drafts/{project_id}/{kind}")
+def draft(project_id: int, kind: str, month: str | None = None, doc_id: int | None = None):
+    """پیش‌نویس Word از روی بایگانی پروژه: invoice (ارسال صورت‌وضعیت)، extension (تمدید)، monthly (گزارش ماهانه)."""
+    from urllib.parse import quote
+
+    from . import drafts
+    name, data = drafts.build(project_id, kind, month, doc_id)
+    return Response(data, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
 
 
 @app.get("/api/letters/{project_id}")
