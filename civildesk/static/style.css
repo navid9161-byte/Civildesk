@@ -543,3 +543,5 @@ svg.chart { width: 100%; height: auto; max-width: 720px; display: block; overflo
 .l-link { color: inherit; text-decoration: underline dotted; }
 .letter-row.flash { background: var(--gold-soft); transition: background .3s; }
 .alert-row .grow { text-align: start; }
+.imp-row { display: flex; gap: 10px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+.imp-row select, .imp-row input { font: inherit; }

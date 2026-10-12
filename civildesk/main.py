@@ -257,6 +257,17 @@ def archive_to_invoice(doc_id: int):
     return archive.to_invoice_record(doc_id)
 
 
+@app.post("/api/import/transactions")
+async def import_transactions(file: UploadFile = File(...), project_id: int | None = Form(None), commit: bool = Form(False)):
+    """ورود دریافت‌ها و هزینه‌های گذشته از Excel/CSV؛ commit=false فقط پیش‌نمایش است."""
+    from . import importer
+
+    data = await file.read()
+    if len(data) > 20 * 1024 * 1024:
+        raise db.ValidationError("حجم فایل بیش از ۲۰ مگابایت است")
+    return importer.run(data, file.filename or "file.xlsx", project_id or None, commit)
+
+
 @app.get("/api/drafts/{project_id}/{kind}")
 def draft(project_id: int, kind: str, month: str | None = None, doc_id: int | None = None):
     """پیش‌نویس Word از روی بایگانی پروژه: invoice (ارسال صورت‌وضعیت)، extension (تمدید)، monthly (گزارش ماهانه)."""
