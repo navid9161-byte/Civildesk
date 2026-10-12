@@ -68,7 +68,20 @@
     <div id="db-body"></div>
   </dialog>
 
+  <dialog id="ctrade" class="ctrade">
+    <form id="ct-form">
+      <div class="db-head"><h3 id="ct-title"></h3><button type="button" class="btn" id="ct-cancel">✕</button></div>
+      <div id="ct-body"></div>
+      <p class="error" id="ct-error"></p>
+      <div class="modal-actions">
+        <button type="submit" class="btn primary">ذخیره</button>
+        <button type="button" class="btn danger" id="ct-delete">حذف</button>
+      </div>
+    </form>
+  </dialog>
+
   <div id="toast" class="toast" hidden></div>
   <script src="/static/app.js"></script>
+  <script src="/static/crypto.js"></script>
 </body>
 </html>

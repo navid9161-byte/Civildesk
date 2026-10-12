@@ -69,7 +69,7 @@ def _asset_version() -> str:
     import hashlib
 
     h = hashlib.sha1()
-    for name in ("app.js", "style.css", "logo.png"):
+    for name in ("app.js", "crypto.js", "style.css", "logo.png"):
         h.update((STATIC / name).read_bytes())
     return h.hexdigest()[:10]
 
@@ -255,6 +255,86 @@ def archive_project(project_id: int):
 def archive_to_invoice(doc_id: int):
     """ثبت صورت‌وضعیت بایگانی‌شده در بخش «صورت‌وضعیت‌ها»."""
     return archive.to_invoice_record(doc_id)
+
+
+# ───────────────────────── معاملات ارز دیجیتال ─────────────────────────
+
+
+@app.get("/api/crypto")
+def crypto_journal():
+    """ژورنال کامل: معاملات با ستون‌های محاسبه‌شده، انتقال‌ها، منحنی موجودی و آمار."""
+    from . import crypto
+
+    return crypto.journal()
+
+
+@app.put("/api/crypto/settings")
+def crypto_settings(data: dict[str, Any]):
+    from . import crypto
+
+    return crypto.save_settings(data)
+
+
+@app.post("/api/crypto/trades", status_code=201)
+def crypto_trade_add(data: dict[str, Any]):
+    from . import crypto
+
+    return crypto.save_trade(data)
+
+
+@app.patch("/api/crypto/trades/{trade_id}")
+def crypto_trade_edit(trade_id: int, data: dict[str, Any]):
+    from . import crypto
+
+    return crypto.save_trade(data, trade_id)
+
+
+@app.delete("/api/crypto/trades/{trade_id}")
+def crypto_trade_delete(trade_id: int):
+    from . import crypto
+
+    crypto.delete_trade(trade_id)
+    return {"ok": True}
+
+
+@app.post("/api/crypto/transfers", status_code=201)
+def crypto_transfer_add(data: dict[str, Any]):
+    from . import crypto
+
+    return crypto.save_transfer(data)
+
+
+@app.delete("/api/crypto/transfers/{transfer_id}")
+def crypto_transfer_delete(transfer_id: int):
+    from . import crypto
+
+    crypto.delete_transfer(transfer_id)
+    return {"ok": True}
+
+
+@app.post("/api/crypto/scan")
+async def crypto_scan(file: UploadFile = File(...)):
+    """عکس معامله ← پیش‌نویس فرم (تا تأیید کاربر ثبت نمی‌شود)."""
+    from . import crypto
+
+    data = await file.read()
+    if len(data) > 15 * 1024 * 1024:
+        raise db.ValidationError("حجم عکس بیش از ۱۵ مگابایت است")
+    return crypto.scan(data, file.filename or "shot.png")
+
+
+@app.post("/api/crypto/shots")
+async def crypto_shot_upload(file: UploadFile = File(...)):
+    from . import crypto
+
+    return {"shot": crypto.save_shot(await file.read(), file.filename or "shot.png")}
+
+
+@app.get("/api/crypto/shots/{name}")
+def crypto_shot(name: str):
+    from . import crypto
+
+    return FileResponse(crypto.shot_path(name), headers={"Cache-Control": "private, max-age=86400"})
 
 
 @app.post("/api/import/transactions")

@@ -596,3 +596,31 @@ svg.donut { width: 100%; max-width: 220px; height: auto; }
   .fin-table th, .fin-table td { padding: 6px 4px; white-space: normal; }
   .bar-cell { min-width: 110px; }
 }
+
+/* ───────── معاملات ارز دیجیتال ───────── */
+.pos { color: var(--ok); }
+.neg { color: var(--danger); }
+.cr-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 14px; }
+.cr-grid .fin-card { margin: 0; }
+.cr-table tbody tr { cursor: pointer; }
+.cr-table tbody tr:hover { background: var(--card-2); }
+.ch-dot.tr { fill: var(--series-4); }
+.tr-bg { background: var(--series-4); }
+dialog.ctrade { width: min(920px, 96vw); max-height: 92vh; overflow: auto; }
+.ctrade h4 { margin: 16px 0 6px; }
+.cr-live { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 10px 12px; border-radius: 10px; background: var(--card-2); font-size: .9rem; margin-top: 8px; }
+.cr-live:empty { display: none; }
+.cr-exit { display: grid; grid-template-columns: repeat(6, minmax(90px, 1fr)) auto; gap: 8px; align-items: end; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+@media (max-width: 760px) { .cr-exit { grid-template-columns: repeat(2, 1fr); } }
+.cr-exit label { display: grid; gap: 3px; font-size: .82rem; color: var(--muted); }
+.cr-exit input, .cr-exit select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); min-width: 0; }
+.cr-checks { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.cr-checks .chk { display: inline-flex; gap: 6px; align-items: center; }
+.cr-shots { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
+.cr-shot { position: relative; }
+.cr-shot img { width: 120px; height: 90px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); }
+.cr-shot button { position: absolute; top: 4px; inset-inline-end: 4px; padding: 2px 7px; }
+.ocr-text { white-space: pre-wrap; direction: ltr; text-align: left; font-size: .8rem; max-height: 220px; overflow: auto; background: var(--card-2); padding: 8px; border-radius: 8px; }
+.calc-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin-top: 12px; }
+.calc-out div { display: flex; justify-content: space-between; gap: 10px; padding: 8px 12px; border-radius: 10px; background: var(--card-2); }
+@media (max-width: 600px) { .cr-table .hm { display: none; } }

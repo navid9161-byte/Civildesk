@@ -28,4 +28,6 @@ def clean_db():
         conn.execute("DELETE FROM doc_chunks")
         conn.execute("DELETE FROM documents")
         conn.execute("DELETE FROM kv")
+        conn.execute("DELETE FROM crypto_trades")
+        conn.execute("DELETE FROM crypto_transfers")
     yield
