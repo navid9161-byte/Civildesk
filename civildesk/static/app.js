@@ -353,6 +353,7 @@ async function renderEntity(view, entity) {
   view.innerHTML = `
     <div class="toolbar">
       <button class="btn primary" id="add">+ ${esc(s.label)} جدید</button>
+      ${entity === "transactions" ? `<button class="btn" id="tx-import">⬆️ ورود از اکسل</button>` : ""}
       <input type="search" id="f-search" placeholder="جستجو…" value="${esc(f.search)}">
       ${hasProject ? `<select id="f-project"><option value="">همه‌ی پروژه‌ها</option>${PROJECTS.map((p) => `<option value="${p.id}" ${String(p.id) === String(f.project_id) ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>` : ""}
       ${hasStatus ? `<select id="f-status"><option value="">${entity === "tasks" ? "وضعیت: همه" : "همه‌ی وضعیت‌ها"}</option>${Object.entries(statusField.choices).map(([k, l]) => `<option value="${k}" ${f.status === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>` : ""}
@@ -362,11 +363,80 @@ async function renderEntity(view, entity) {
     <div class="list">${rows.length ? rows.map((r) => itemHTML(entity, r, META.today)).join("") : `<div class="card empty">موردی پیدا نشد.</div>`}</div>`;
 
   $("#add").onclick = () => openForm(entity, null);
+  if (entity === "transactions") $("#tx-import").onclick = () => importTransactions(view, entity);
   let t;
   $("#f-search").oninput = (e) => { clearTimeout(t); t = setTimeout(() => { f.search = e.target.value; renderEntity(view, entity).then(() => { const el = $("#f-search"); el.focus(); el.setSelectionRange(el.value.length, el.value.length); }); }, 300); };
   if (hasProject) $("#f-project").onchange = (e) => { f.project_id = e.target.value; render(); };
   if (hasStatus) $("#f-status").onchange = (e) => { f.status = e.target.value; render(); };
   if (entity === "tasks") $("#f-open").onchange = (e) => { f.open = e.target.checked; render(); };
+}
+
+// ───────── ورود دریافت و پرداخت‌های گذشته از Excel/CSV ─────────
+function importTransactions(view, entity) {
+  const dlg = $("#docbrief");
+  let file = null;
+  $("#db-title").textContent = "⬆️ ورود دریافت و پرداخت‌ها از فایل";
+  const body = $("#db-body");
+  body.innerHTML = `
+    <p class="muted">خروجی Excel (xlsx) یا CSV برنامه‌ی قبلی را انتخاب کنید. ستون‌های تاریخ، مبلغ، شرح، دسته و نوع خودکار
+      شناخته می‌شوند؛ برگه‌های خلاصه (جمع روزانه، جمع دسته‌ها) کنار گذاشته می‌شوند تا چیزی دو بار حساب نشود.
+      اول پیش‌نمایش نشان داده می‌شود و تا تأیید نکنید چیزی ثبت نمی‌شود.</p>
+    <label class="imp-row">فایل <input type="file" id="imp-file" accept=".xlsx,.xlsm,.csv"></label>
+    <label class="imp-row">پروژه <select id="imp-proj"><option value="">بدون پروژه (شخصی)</option>${PROJECTS.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select></label>
+    <div id="imp-out"></div>`;
+  $("#db-close").onclick = () => dlg.close();
+  const send = async (commit) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if ($("#imp-proj").value) fd.append("project_id", $("#imp-proj").value);
+    fd.append("commit", commit ? "true" : "false");
+    const res = await fetch("/api/import/transactions", { method: "POST", body: fd });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "خطای سرور");
+    return data;
+  };
+  const preview = async () => {
+    const out = $("#imp-out");
+    out.innerHTML = `<p class="muted">⏳ در حال خواندن فایل…</p>`;
+    try {
+      const r = await send(false);
+      const sheets = r.sheets.map((x) => `<li>${esc(x.name)}: ${x.type === "transactions" ? `${num(x.count)} ردیف${x.unit ? ` (به ${esc(x.unit)}${x.unit !== r.currency ? ` ← تبدیل به ${esc(r.currency)}` : ""})` : ""}`
+        : x.type === "notes" ? `${num(x.count)} یادداشت` : `<span class="muted">کنار گذاشته شد (${esc(x.reason)})</span>`}</li>`).join("");
+      out.innerHTML = `
+        <h4>پیش‌نمایش</h4>
+        <ul class="points">${sheets}</ul>
+        <div class="stats">
+          <div class="stat"><div class="v">${num(r.new)}</div><div class="l">ردیف جدید${r.from ? ` (${faDigits(r.from)} تا ${faDigits(r.to)})` : ""}</div></div>
+          <div class="stat bad"><div class="v">${num(r.expense)}</div><div class="l">جمع هزینه‌ها (${esc(r.currency)})</div></div>
+          <div class="stat good"><div class="v">${num(r.income)}</div><div class="l">جمع دریافتی‌ها (${esc(r.currency)})</div></div>
+        </div>
+        ${r.duplicates ? `<p class="notice">↺ ${num(r.duplicates)} ردیف قبلاً ثبت شده و دوباره ثبت نمی‌شود.</p>` : ""}
+        ${r.notes ? `<p class="muted">📝 ${num(r.notes)} یادداشت هم به بخش یادداشت‌ها اضافه می‌شود.</p>` : ""}
+        ${r.guessed.length ? `<p class="badge amber">⚠️ ${num(r.guessed.length)} ردیف تاریخ دقیق نداشت و با تاریخ ${faDigits(r.guessed[0].tx_date)} ثبت می‌شود (متن اصلی تاریخ در شرح می‌ماند؛ بعداً می‌توانید اصلاح کنید):</p>
+          <ul class="points">${r.guessed.map((g) => `<li>${esc(faDigits(g.description))}</li>`).join("")}</ul>` : ""}
+        ${r.by_category.length ? `<h4>هزینه به تفکیک دسته</h4><div class="table-wrap"><table class="inv-table"><tbody>${r.by_category.map(([c, v]) => `<tr><td>${esc(c)}</td><td>${num(v)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+        <h4>نمونه‌ی ردیف‌ها</h4>
+        <div class="table-wrap"><table class="inv-table"><thead><tr><th>تاریخ</th><th>نوع</th><th>مبلغ</th><th>دسته</th><th>شرح</th></tr></thead>
+          <tbody>${r.sample.map((x) => `<tr><td>${faDigits(x.tx_date)}</td><td>${x.kind === "income" ? "دریافتی" : "هزینه"}</td><td>${num(x.amount)}</td><td>${esc(x.category || "")}</td><td>${esc(faDigits(x.description))}</td></tr>`).join("")}</tbody></table></div>
+        <div class="modal-actions">${r.new || r.notes ? `<button class="btn primary" id="imp-go">✔ ثبت ${num(r.new)} ردیف${r.notes ? ` و ${num(r.notes)} یادداشت` : ""}</button>` : `<span class="muted">چیز جدیدی برای ثبت نیست.</span>`}</div>`;
+      const go = $("#imp-go");
+      if (go) go.onclick = async () => {
+        go.disabled = true;
+        go.textContent = "⏳ در حال ثبت…";
+        try {
+          const done = await send(true);
+          dlg.close();
+          toast(`${num(done.new)} ردیف${done.notes ? ` و ${num(done.notes)} یادداشت` : ""} ثبت شد ✔`);
+          renderEntity(view, entity);
+        } catch (err) { go.disabled = false; go.textContent = "ثبت"; toast(err.message); }
+      };
+    } catch (err) {
+      out.innerHTML = `<p class="error">${esc(err.message)}</p>`;
+    }
+  };
+  $("#imp-file").onchange = (e) => { file = e.target.files[0]; if (file) preview(); };
+  $("#imp-proj").onchange = () => { if (file) preview(); };
+  dlg.showModal();
 }
 
 // ───────────────────────── فرم ایجاد / ویرایش ─────────────────────────
