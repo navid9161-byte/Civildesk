@@ -13,7 +13,7 @@ import re
 import unicodedata
 from typing import Any
 
-from . import db, jalali, story, textnorm
+from . import db, followup, jalali, learning, story, textnorm
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ EDITABLE = ("category", "doc_date", "doc_no", "subject")
 ANALYZE_PAGES = 12  # فقط صفحه‌های اول برای تشخیص، استخراج و خلاصه
 TEXT_PAGES = 40  # متن این تعداد صفحه نگه داشته می‌شود (بخش‌های گزارش ماهانه، مثل مشکلات، در صفحه‌های بعدی‌اند)
 TEXT_CHARS = 150000
-ARCHIVE_VERSION = "5"  # با تغییر آن، همه‌ی اسناد یک بار دوباره تحلیل می‌شوند
+ARCHIVE_VERSION = "6"  # با تغییر آن، همه‌ی اسناد یک بار دوباره تحلیل می‌شوند
 
 # واژه‌های هر دسته (به شکل یکسان‌شده‌ی textnorm.normalize)
 _KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -259,6 +259,41 @@ def labeled_number(text: str, letter: bool) -> tuple[int, str] | None:
             if sum(c.isdigit() and c != "0" for c in v) >= 2 and sum(c.isdigit() for c in v) >= 3 and not _DATE_RE.fullmatch(v):
                 return m.start(), v
     return None
+
+
+# ارجاع به نامه‌ی دیگر: «بازگشت به نامه شماره ۱۴۰۵/۱۲۳/ص مورخ ۱۴۰۵/۰۶/۰۲»، «پیرو نامه‌ی …»
+_REF = re.compile(
+    r"(?:(بازگشت|عطف|پیرو|در\s+پاسخ|در\s+جواب|جوابیه|پاسخ)\s*(?:به\s+)?)?نامه(?:[\s‌]*ی)?(?:\s+(?:شماره|به\s+شماره))?\s*[:.]?\s*"
+    r"((?:[آ-ی]{1,4}\s*[/\-]\s*)?\d{1,6}(?:\s*[/\-]\s*(?:\d{1,6}|[آ-ی]{1,4}(?![آ-ی])))+|\d{3,7}(?![\d/]))"
+    r"(?:[\s،,]*(?:مورخ|مورّخ|به\s+تاریخ|تاریخ|مورخه)\s*[:.]?\s*(\d{2,4}\s*/\s*\d{1,2}\s*/\s*\d{1,4}))?")
+
+
+def number_key(no: str | None) -> str | None:
+    """کلید مقایسه‌ی شماره‌ی نامه: گروه‌های رقمی (ترتیب و حروف و جداکننده مهم نیستند)."""
+    groups = sorted(g.lstrip("0") or "0" for g in re.findall(r"\d+", _prep(no or "")))
+    if not groups or sum(len(g) for g in groups) < 3:
+        return None
+    return "-".join(groups)
+
+
+def letter_refs(text: str, own_no: str | None = None) -> list[dict[str, Any]]:
+    """نامه‌هایی که این نامه به آن‌ها ارجاع داده (reply: «بازگشت/عطف/پیرو/در پاسخ»)."""
+    own = number_key(own_no)
+    out, seen = [], set()
+    for m in _REF.finditer(text):
+        no = re.sub(r"\s+", "", m.group(2))
+        if _DATE_RE.fullmatch(no):  # «نامه مورخ ۱۴۰۵/۰۶/۰۲» تاریخ است، نه شماره
+            continue
+        key = number_key(no)
+        if not key or key == own or key in seen:
+            continue
+        seen.add(key)
+        date = None
+        if m.group(3):
+            dm = _DATE_RE.search(m.group(3))
+            date = _date_from_match(dm) if dm else None
+        out.append({"pos": m.start(), "no": no, "key": key, "date": date, "reply": bool(m.group(1))})
+    return out[:8]
 
 
 def _dates(text: str) -> list[tuple[int, str]]:
@@ -923,6 +958,11 @@ def extract(text: str, category: str) -> dict[str, Any]:
             info["deadline"] = {"pos": dd[0], "value": dd[1], "date": dd[1],
                                 "context": _sentence(text, dd[0])}
 
+    if category in ("letter", "order", "minutes"):
+        refs = letter_refs(strip_header(text)[:6000], (info.get("doc_no") or {}).get("value"))
+        if refs:
+            info["refs"] = refs
+
     # مصوبات صورتجلسه
     if category == "minutes":
         mm = re.search(r"(?:مصوبات|تصمیمات|نتایج)[^\n]{0,20}\n", text)
@@ -996,6 +1036,9 @@ def analyze(doc_id: int, page_texts: list[tuple[int, str]] | None = None,
             conn.execute("UPDATE documents SET sheets = ? WHERE id = ?", (json.dumps(sheets, ensure_ascii=False), doc_id))
         edited = set(json.loads(d["edited"] or "[]"))
         category = d["category"] if "category" in edited else classify(d["title"], text, d["kind"], d["pages"] or 1)
+        if "category" not in edited and category in ("other", "photo"):
+            # دسته‌ی نامطمئن: عنوانی که کاربر قبلاً دسته‌اش را تعیین کرده (سربرگ مشترک نامه‌ها را عوض نمی‌کند)
+            category = learning.category_for(text) or category
         info = extract(text, category) if text.strip() else {}
         if category == "invoice" and sheets:
             apply_sheets(info, sheets)
@@ -1003,6 +1046,8 @@ def analyze(doc_id: int, page_texts: list[tuple[int, str]] | None = None,
             apply_report(info, report_fields([(p, _prep(t)) for p, t in all_pages]))
         if category in ("invoice", "report") and "report_no" not in info and (code := doc_code(text[:6000])):
             info["doc_no"] = {"pos": code[0], "value": code[1]}  # کد سند، نه شماره‌ی قرارداد در سربرگ
+        if text.strip():
+            learning.apply(text, info, category)  # الگوهایی که از اصلاح‌های کاربر یاد گرفته شده
         if category == "invoice" and "invoice_no" not in info:  # «وضعیت شماره ۳.pdf»
             tm = re.search(r"(\d{1,3})(?!\d)", _prep(d["title"]))
             if tm:
@@ -1072,7 +1117,7 @@ def analyze_pending() -> int:
     return len(ids)
 
 
-def update_meta(doc_id: int, data: dict[str, Any]) -> None:
+def update_meta(doc_id: int, data: dict[str, Any]) -> list[str]:
     """ویرایش دستی دسته، تاریخ، شماره، موضوع، عنوان و پروژه‌ی سند."""
     sets: dict[str, Any] = {}
     with db.connect() as conn:
@@ -1106,11 +1151,21 @@ def update_meta(doc_id: int, data: dict[str, Any]) -> None:
             sets["project_auto"] = 0
         edited |= {k for k in sets if k in (*EDITABLE, "project_id")}
         if not sets:
-            return
+            return []
+        old = conn.execute("SELECT doc_no, doc_date, category FROM documents WHERE id = ?", (doc_id,)).fetchone()
         conn.execute(
             f"UPDATE documents SET {''.join(f'{k}=?, ' for k in sets)}edited=?, updated_at=? WHERE id = ?",
             (*sets.values(), json.dumps(sorted(edited)), db.now_str(), doc_id),
         )
+    # یادگیری: فقط مقدارهایی که واقعاً عوض شده‌اند
+    changes = {k: sets[k] for k in ("doc_no", "doc_date", "category") if sets.get(k) and sets[k] != old[k]}
+    if not changes:
+        return []
+    text = "\n\n".join(t for p, t in head_pages_for(doc_id) if p <= 3)[:20000]
+    learned = learning.learn(text, changes, sets.get("category") or old["category"]) if text.strip() else []
+    if learned:
+        learning.reapply_async(exclude=doc_id)
+    return learned
 
 
 # ───────────────────────── خلاصه‌ی پروژه ─────────────────────────
@@ -1355,6 +1410,14 @@ def project_summary(project_id: int | None) -> dict[str, Any]:
             if field and not project.get(field):
                 suggestions.append({"field": field, "label": labels[field], "value": f["value"], "money": f.get("money", False)})
 
+    letter_rows = _letter_rows(docs, today)
+    reports = sorted(by_cat.get("report", []), key=lambda d: d["date"])
+    fdict = {f["key"]: f["value"] for f in facts}
+    for k in ("start_date", "end_date", "contract_amount"):
+        fdict.setdefault(k, (project or {}).get(k))
+    alerts = followup.alerts(fdict, invoices, guarantees, deadlines, letter_rows, reports, today)
+    chart = followup.progress_chart(fdict, invoices, today)
+
     narrative = story.build(project, ready, contract, {f["key"]: f["value"] for f in facts},
                             deadlines, guarantees, invoices, today, _src) if project else []
 
@@ -1367,7 +1430,8 @@ def project_summary(project_id: int | None) -> dict[str, Any]:
         "project": project, "documents": docs, "counts": counts, "categories": CATEGORIES,
         "facts": facts, "amendments": amendments, "last_invoice": last_invoice, "invoices": invoices,
         "guarantees": guarantees, "deadlines": deadlines[:12], "minutes": minutes, "suggestions": suggestions,
-        "timeline": timeline, "story": narrative, "today": today,
+        "timeline": timeline, "story": narrative, "today": today, "alerts": alerts, "chart": chart,
+        "unanswered": [x for x in letter_rows if x.get("waiting") is not None][:20],
         "pending": sum(1 for d in docs if d["status"] in ("queued", "processing")),
         "last_update": max((d.get("analyzed_at") or "" for d in docs), default="") or None,
     }
@@ -1459,8 +1523,15 @@ def letters_register(project_id: int | None) -> dict[str, Any]:
         with db.connect() as conn:
             project = db.get(conn, "projects", project_id)
     today = db.today_str()
-    letters = []
-    for d in list_docs(project_id):
+    letters = _letter_rows(list_docs(project_id), today)
+    return {"project": project, "letters": letters, "today": today,
+            "pending": sum(1 for x in letters if x["status"] in ("queued", "processing")),
+            "unanswered": sum(1 for x in letters if x.get("waiting") is not None)}
+
+
+def _letter_rows(docs: list[dict], today: str) -> list[dict[str, Any]]:
+    letters, infos = [], {}
+    for d in docs:
         if d.get("category") not in LETTER_CATS:
             continue
         info = d["info"]
@@ -1482,8 +1553,9 @@ def letters_register(project_id: int | None) -> dict[str, Any]:
             "subject": d.get("subject"), "summary": letter_summary(d),
             "deadline": due, "late": bool(due and due < today), "error": d.get("error"),
         })
-    return {"project": project, "letters": letters, "today": today,
-            "pending": sum(1 for x in letters if x["status"] in ("queued", "processing"))}
+        infos[d["id"]] = info
+    followup.link_letters(letters, infos, number_key, today)
+    return letters
 
 
 def letters_csv(project_id: int | None) -> tuple[str, bytes]:
