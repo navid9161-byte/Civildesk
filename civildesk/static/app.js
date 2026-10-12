@@ -71,6 +71,7 @@ const ICONS = {
   calendar: "M3 5h18v16H3zM3 10h18M8 3v4M16 3v4",
   flag: "M4 22V4M4 4h13l-2 4 2 4H4",
   more: "M5 12h.01M12 12h.01M19 12h.01",
+  crypto: "M3 17l5-5 4 4 8-8M15 8h5v5",
   plus: "M12 5v14M5 12h14",
 };
 const ico = (name, cls = "ico") => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${ICONS[name] || ""}"/></svg>`;
@@ -86,6 +87,7 @@ const TABS = [
   ["daily_reports", "گزارش روزانه"],
   ["invoices", "صورت‌وضعیت"],
   ["transactions", "دریافت و پرداخت"],
+  ["crypto", "معاملات ارز دیجیتال"],
   ["contacts", "مخاطبین"],
   ["notes", "یادداشت‌ها"],
 ];
@@ -134,6 +136,7 @@ async function render() {
     else if (state.tab === "archive") await renderArchive(view);
     else if (state.tab === "letters") await renderLetters(view);
     else if (state.tab === "transactions" && !financeState.detail) await renderFinance(view);
+    else if (state.tab === "crypto") await renderCrypto(view);
     else await renderEntity(view, state.tab);
   } catch (e) {
     view.innerHTML = `<div class="card error">${esc(e.message)}</div>`;

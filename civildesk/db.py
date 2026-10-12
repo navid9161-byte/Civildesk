@@ -295,6 +295,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )"""
     )
     conn.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)")
+    from . import crypto  # جدول‌های معاملات ارز دیجیتال
+
+    crypto.migrate(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(status, due_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_channel ON chat_messages(channel, id)")
     # کتابخانه‌ی اسناد (PDF و ...) برای پرسش و پاسخ
