@@ -127,6 +127,35 @@ function go(tab) {
   render();
 }
 
+function fitStats() {
+  // عدد هر کادر آمار در یک خط و کامل دیده شود: قلم تا ۱۵ پیکسل کوچک می‌شود؛ اگر باز جا نشد مبلغ کوتاه
+  // («۱٫۴۶ هزار میلیارد») نشان داده می‌شود و عدد کامل با نگه‌داشتن ماوس/لمس دیده می‌شود
+  document.querySelectorAll(".stat .v").forEach((el) => {
+    if (el.dataset.full) el.textContent = el.dataset.full;
+    el.classList.remove("wrap");
+    el.style.fontSize = "";
+    const shrink = (min) => {
+      let size = parseFloat(getComputedStyle(el).fontSize);
+      while (el.scrollWidth > el.clientWidth + 1 && size > min) {
+        size -= 1;
+        el.style.fontSize = `${size}px`;
+      }
+    };
+    shrink(el.dataset.short ? 15 : 13);
+    if (el.scrollWidth > el.clientWidth + 1 && el.dataset.short) {
+      el.textContent = el.dataset.short;
+      el.style.fontSize = "";
+      shrink(13);
+    }
+    if (el.scrollWidth > el.clientWidth + 1) el.classList.add("wrap");
+  });
+}
+// مبلغ در کادر آمار: عدد کامل، با نسخه‌ی کوتاه برای وقتی جا نشود
+const moneyV = (v) => `<div class="v" data-full="${num(v)}" data-short="${v < 0 ? "−" : ""}${shortMoney(Math.abs(v || 0))}" title="${num(v)} ${META.currency}">${num(v)}</div>`;
+new MutationObserver(() => requestAnimationFrame(fitStats)).observe(document.getElementById("view"), { childList: true, subtree: true });
+let fitTimer;
+window.addEventListener("resize", () => { clearTimeout(fitTimer); fitTimer = setTimeout(fitStats, 150); });
+
 async function render() {
   const view = $("#view");
   try {
@@ -294,8 +323,8 @@ async function renderDashboard(view) {
       <div class="stat ${d.overdue.length ? "bad" : ""}">${ico("alert")}<div><div class="v">${num(d.overdue.length)}</div><div class="l">کار عقب‌افتاده</div></div></div>
       <div class="stat">${ico("target")}<div><div class="v">${num(d.due_today.length)}</div><div class="l">کار امروز</div></div></div>
       <div class="stat">${ico("projects")}<div><div class="v">${num(activeProjects)}</div><div class="l">پروژه‌ی فعال</div></div></div>
-      <div class="stat good">${ico("transactions")}<div><div class="v">${num(d.month.income)}</div><div class="l">دریافتی این ماه (${META.currency})</div></div></div>
-      <div class="stat bad">${ico("invoices")}<div><div class="v">${num(d.month.expense)}</div><div class="l">هزینه‌ی این ماه (${META.currency})</div></div></div>
+      <div class="stat good money">${ico("transactions")}<div>${moneyV(d.month.income)}<div class="l">دریافتی این ماه (${META.currency})</div></div></div>
+      <div class="stat bad money">${ico("invoices")}<div>${moneyV(d.month.expense)}<div class="l">هزینه‌ی این ماه (${META.currency})</div></div></div>
     </div>
     <div class="grid">
       ${d.overdue.length ? `<div class="card danger-edge"><h3>${ico("alert")} عقب‌افتاده <span class="count">${num(d.overdue.length)}</span></h3>${list(d.overdue, "")}</div>` : ""}
@@ -349,9 +378,9 @@ async function renderEntity(view, entity) {
   if (entity === "transactions") {
     const inc = rows.filter((r) => r.kind === "income").reduce((a, r) => a + r.amount, 0);
     const exp = rows.filter((r) => r.kind === "expense").reduce((a, r) => a + r.amount, 0);
-    summary = `<div class="stats"><div class="stat good"><div class="v">${num(inc)}</div><div class="l">جمع دریافتی</div></div>
-      <div class="stat bad"><div class="v">${num(exp)}</div><div class="l">جمع هزینه</div></div>
-      <div class="stat"><div class="v">${num(inc - exp)}</div><div class="l">مانده (${META.currency})</div></div></div>`;
+    summary = `<div class="stats"><div class="stat good"><div>${moneyV(inc)}<div class="l">جمع دریافتی</div></div></div>
+      <div class="stat bad"><div>${moneyV(exp)}<div class="l">جمع هزینه</div></div></div>
+      <div class="stat"><div>${moneyV(inc - exp)}<div class="l">مانده (${META.currency})</div></div></div></div>`;
   }
 
   view.innerHTML = `
